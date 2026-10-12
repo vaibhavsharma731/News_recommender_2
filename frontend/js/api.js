@@ -73,5 +73,72 @@ const Api = (() => {
     });
   }
 
-  return { status, trending, articles, sections, getArticle, recommend };
+  /** PostgreSQL & Editor Endpoints */
+  async function dbHealth() {
+    return _fetch('/db/health');
+  }
+
+  async function dbInit() {
+    const res = await fetch(`${API_BASE}/db/init`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'DB Init failed');
+    }
+    return res.json();
+  }
+
+  async function uploadCsv(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/db/upload-csv`, {
+      method: 'POST',
+      body: formData,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'CSV upload failed');
+    }
+    return res.json();
+  }
+
+  async function jobStatus(jobId) {
+    return _fetch(`/db/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  async function recentJobs() {
+    return _fetch('/db/jobs');
+  }
+
+  async function ingestDefault(limit = null) {
+    const query = limit ? `?limit=${limit}` : '';
+    const res = await fetch(`${API_BASE}/db/ingest-default${query}`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Default dataset ingest failed');
+    }
+    return res.json();
+  }
+
+  /** Precomputed recommendations lookup — sub-5ms from PostgreSQL */
+  async function precomputedRecs(articleId, limit = 10) {
+    return _fetch(`/db/recommendations/${encodeURIComponent(articleId)}?limit=${limit}`);
+  }
+
+  return {
+    status,
+    trending,
+    articles,
+    sections,
+    getArticle,
+    recommend,
+    dbHealth,
+    dbInit,
+    uploadCsv,
+    ingestDefault,
+    jobStatus,
+    recentJobs,
+    precomputedRecs
+  };
 })();
+
+

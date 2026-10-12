@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>News Recommender | Indian Express Discovery</title>
-  <meta name="description" content="News recommendation engine built on Indian Express articles. Relevant news discovery with semantic search, BM25 retrieval, and cross-encoder reranking." />
+  <title>News Recommender | Indian Express Discovery &amp; PostgreSQL Pipeline</title>
+  <meta name="description" content="News recommendation engine built on Indian Express articles. Features an Editor Studio with PostgreSQL pgvector pipeline and a high-speed Reader View." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
@@ -20,6 +20,7 @@
   <link rel="stylesheet" href="css/search.css" />
   <link rel="stylesheet" href="css/toast.css" />
   <link rel="stylesheet" href="css/animations.css" />
+  <link rel="stylesheet" href="css/editor.css" />
 </head>
 <body>
 
@@ -34,7 +35,7 @@
         <span>News Recommender</span>
       </div>
       <div class="loading-bar"><div class="loading-fill"></div></div>
-      <p id="loading-text">Loading recommendation engine...</p>
+      <p id="loading-text">Connecting to PostgreSQL &amp; recommendation engine...</p>
     </div>
   </div>
 
@@ -51,19 +52,22 @@
           <div class="brand-icon">✦</div>
           <div class="brand-text">
             <span class="brand-name">News Recommender</span>
-            <span class="brand-sub">Indian Express Discovery</span>
+            <span class="brand-sub">PostgreSQL &amp; pgvector Pipeline</span>
           </div>
-        </div>
-        <div class="powered-badge">
-          <span class="ai-dot"></span> Neural &amp; Hybrid Search
         </div>
       </div>
 
+      <!-- CENTER: ROLE SWITCHER (EDITOR vs READER) -->
       <div class="navbar-center">
-        <div class="search-bar" id="global-search-bar">
-          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-          <input type="text" id="global-search-input" placeholder="Search news, topics, or keywords…" autocomplete="off" />
-          <button class="search-clear hidden" id="search-clear-btn">✕</button>
+        <div class="role-switcher" id="role-switcher">
+          <button class="role-tab active" id="role-btn-editor" data-role="editor">
+            <span class="role-icon">✍️</span>
+            <span>Editor Studio</span>
+          </button>
+          <button class="role-tab" id="role-btn-reader" data-role="reader">
+            <span class="role-icon">📰</span>
+            <span>Reader View</span>
+          </button>
         </div>
       </div>
 
@@ -71,226 +75,479 @@
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
           <span id="theme-icon">🌙</span>
         </button>
-        <div class="avatar">V</div>
+        <div class="avatar" title="Logged in as Admin">E</div>
       </div>
     </header>
 
-    <!-- ── MAIN BODY ── -->
-    <div class="body-wrap">
+    <!-- ══════════════════════════════════════════════════════════════════════
+         SECTION 1: EDITOR ROLE STUDIO (INGESTION, CLEANING, PGVECTOR, ANIMATION)
+         ══════════════════════════════════════════════════════════════════════ -->
+    <div id="editor-view" class="role-view">
+      <div class="editor-container">
 
-      <!-- ── LEFT SIDEBAR ── -->
-      <aside class="sidebar" id="sidebar">
-        <div class="sidebar-inner">
+        <!-- Editor Header -->
+        <div class="editor-hero-header">
+          <div class="editor-hero-title">
+            <h1><span>✍️</span> Editor Neural Pipeline &amp; Database Studio</h1>
+            <p>Upload news CSV datasets, run automated cleaning, generate 768d dense vectors, and precompute top-10 recommendations directly into PostgreSQL.</p>
+          </div>
+          <div style="display:flex;gap:10px;">
+            <button class="btn btn-secondary" id="init-db-btn" style="font-size:0.82rem;padding:8px 14px;">
+              Verify PostgreSQL &amp; Extension
+            </button>
+            <button class="btn btn-secondary" id="clear-db-btn" style="font-size:0.82rem;padding:8px 14px;color:#ef4444;border-color:rgba(239,68,68,0.35);">
+              🗑️ Clear Database
+            </button>
+          </div>
+        </div>
 
-          <!-- RecSys Controls -->
-          <section class="sidebar-section">
-            <div class="sidebar-section-header">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
-              <span>RecSys Controls</span>
+        <!-- 1. Database Health & Metric Cards -->
+        <div class="editor-stats-grid">
+          <div class="editor-stat-card">
+            <div class="stat-icon">🐘</div>
+            <div class="stat-label">PostgreSQL Database</div>
+            <div class="stat-badge ready" id="pg-status-badge">Checking...</div>
+          </div>
+          <div class="editor-stat-card">
+            <div class="stat-icon">⚡</div>
+            <div class="stat-label">pgvector Extension</div>
+            <div class="stat-badge ready" id="vector-status-badge">Checking...</div>
+          </div>
+          <div class="editor-stat-card">
+            <div class="stat-icon">📰</div>
+            <div class="stat-label">Articles in Database</div>
+            <div class="stat-value" id="db-total-articles">—</div>
+          </div>
+          <div class="editor-stat-card">
+            <div class="stat-icon">🧬</div>
+            <div class="stat-label">768d Vector Embeddings</div>
+            <div class="stat-value" id="db-total-vectors">—</div>
+          </div>
+          <div class="editor-stat-card">
+            <div class="stat-icon">🎯</div>
+            <div class="stat-label">Precomputed Rec Pairs</div>
+            <div class="stat-value" id="db-total-recs">—</div>
+          </div>
+        </div>
+
+        <!-- 2. CSV Upload & Ingestion Zone -->
+        <div class="upload-card">
+          <div class="upload-card-header">
+            <div class="upload-card-title">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              Upload &amp; Ingest News Dataset (.csv)
             </div>
+            <div style="display:flex;gap:10px;align-items:center;">
+              <button class="btn btn-secondary" id="ingest-demo-btn" style="font-size:0.82rem;padding:8px 14px;">
+                ⚡ Ingest Sample Dataset (100 Articles Demo)
+              </button>
+              <button class="btn btn-primary" id="start-ingest-btn" disabled>
+                Run Ingestion &amp; Precompute
+              </button>
+            </div>
+          </div>
 
-            <div class="control-group">
-              <label class="control-label">Recommendations Count</label>
-              <div class="slider-row">
-                <input type="range" id="top-k-slider" min="3" max="15" value="10" class="slider" />
-                <span class="slider-value" id="top-k-value">10</span>
+          <input type="file" id="csv-file-input" accept=".csv" style="display:none;" />
+          <div class="upload-dropzone" id="upload-dropzone" role="button" tabindex="0">
+            <span class="dz-icon">📂</span>
+            <div class="dz-title">Drag &amp; drop your articles CSV here, or click to browse</div>
+            <div class="dz-sub">Accepts raw or cleaned news CSV with title, body, section, and dates</div>
+            <div style="margin-top:12px;">
+              <button type="button" id="browse-files-btn" class="btn btn-secondary" style="font-size:0.8rem;padding:6px 14px;"
+                onclick="document.getElementById('csv-file-input').click();event.stopPropagation();">Browse Files</button>
+            </div>
+          </div>
+
+
+          <div class="file-preview hidden" id="file-preview">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <span>📄</span>
+              <span class="file-name" id="file-preview-name">articles.csv</span>
+            </div>
+            <span style="font-size:0.75rem;color:var(--color-success)">✓ File ready for neural ingestion</span>
+          </div>
+        </div>
+
+        <!-- 3. ANIMATED PIPELINE VISUALIZER -->
+        <div class="pipeline-visualizer-card hidden" id="pipeline-visualizer-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+              <h3 style="font-size:1.1rem;font-weight:800;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
+                <span>⚡</span> Live Neural Pipeline Ingestion
+              </h3>
+              <p style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">Real-time progress across cleaning, PostgreSQL insertion, 768d embedding generation, and cross-encoder reranking.</p>
+            </div>
+            <div style="font-size:1.3rem;font-weight:800;color:var(--brand-primary);" id="visualizer-progress-pct">0%</div>
+          </div>
+
+          <!-- Progress Track -->
+          <div class="progress-track" style="margin-top:16px;">
+            <div class="progress-bar-fill" id="visualizer-progress-fill"></div>
+          </div>
+          <div class="progress-message" id="visualizer-status-msg" style="margin-bottom:20px;">Starting background worker...</div>
+
+          <!-- 5-Node Animated Pipeline Diagram -->
+          <div class="pipeline-diagram">
+            <div class="pipeline-node" id="node-parse">
+              <span class="node-icon">📂</span>
+              <span class="node-title">1. Parse CSV</span>
+              <span class="node-sub">Validate Schema</span>
+              <span class="node-status">Waiting</span>
+            </div>
+            <div class="pipeline-connector">➜</div>
+            <div class="pipeline-node" id="node-clean">
+              <span class="node-icon">🧹</span>
+              <span class="node-title">2. Clean &amp; Strip</span>
+              <span class="node-sub">Remove Boilerplate</span>
+              <span class="node-status">Waiting</span>
+            </div>
+            <div class="pipeline-connector">➜</div>
+            <div class="pipeline-node" id="node-storage">
+              <span class="node-icon">🐘</span>
+              <span class="node-title">3. PostgreSQL</span>
+              <span class="node-sub">Insert Articles</span>
+              <span class="node-status">Waiting</span>
+            </div>
+            <div class="pipeline-connector">➜</div>
+            <div class="pipeline-node" id="node-embed">
+              <span class="node-icon">🧬</span>
+              <span class="node-title">4. 768d Vectors</span>
+              <span class="node-sub">pgvector Embeddings</span>
+              <span class="node-status">Waiting</span>
+            </div>
+            <div class="pipeline-connector">➜</div>
+            <div class="pipeline-node" id="node-rerank">
+              <span class="node-icon">🎯</span>
+              <span class="node-title">5. Rerank Top 10</span>
+              <span class="node-sub">Save Recs Table</span>
+              <span class="node-status">Waiting</span>
+            </div>
+          </div>
+
+          <!-- Real-Time Terminal Log Window -->
+          <div style="margin-top:18px;">
+            <div style="font-size:0.75rem;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px;">
+              Live Pipeline Event Log
+            </div>
+            <div class="pipeline-log-window" id="pipeline-log-window">
+              <div class="log-entry">
+                <span class="log-time">[System]</span> <span>Pipeline initialized and waiting for task.</span>
               </div>
-              <div class="slider-ticks"><span>3</span><span>15</span></div>
+            </div>
+          </div>
+
+          <!-- Completion Banner with Call-To-Action to switch to Reader View -->
+          <div class="completion-banner hidden" id="pipeline-completion-banner">
+            <div class="completion-info">
+              <div class="completion-icon">🎉</div>
+              <div>
+                <h3>Ingestion Complete &amp; Recommendations Ready!</h3>
+                <p id="completion-summary-text">All articles and precomputed recommendations are stored in PostgreSQL.</p>
+              </div>
+            </div>
+            <button class="btn-switch-reader" id="btn-switch-to-reader">
+              <span>🚀 Switch to Reader View to Browse Recommendations</span>
+            </button>
+          </div>
+
+        </div>
+
+        <!-- 4. Precomputed Recommendations Inspector -->
+        <div class="inspector-card">
+          <div class="upload-card-header">
+            <div class="upload-card-title">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              Precomputed Recommendations Inspector (Sub-5ms Query)
+            </div>
+          </div>
+          <p style="font-size:0.83rem;color:var(--text-secondary);margin-bottom:12px;">
+            Select any article from PostgreSQL to inspect its saved Top 10 recommendations:
+          </p>
+          <select id="inspector-article-select" class="select-input select-lg">
+            <option value="">-- Choose an article to inspect --</option>
+          </select>
+
+          <div class="rec-table-wrap">
+            <table class="rec-table">
+              <thead>
+                <tr>
+                  <th style="width:50px;">Rank</th>
+                  <th>Article Title</th>
+                  <th>Section</th>
+                  <th>Confidence Score</th>
+                  <th>Algorithm</th>
+                </tr>
+              </thead>
+              <tbody id="inspector-table-body">
+                <tr><td colspan="5" style="text-align:center;padding:24px;color:var(--text-muted)">Select an article above to inspect its saved top-10 recommendations.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div id="inspector-empty" class="empty-state hidden" style="padding:24px;">
+            <p>No precomputed recommendations found for this article in PostgreSQL yet.</p>
+          </div>
+        </div>
+
+        <!-- 5. Recent Jobs History -->
+        <div class="inspector-card">
+          <div class="upload-card-header">
+            <div class="upload-card-title">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 8 12 12 14 14"/><circle cx="12" cy="12" r="10"/></svg>
+              Recent Ingestion Tasks
+            </div>
+          </div>
+          <div class="rec-table-wrap">
+            <table class="rec-table">
+              <thead>
+                <tr>
+                  <th>Job ID</th>
+                  <th>Filename</th>
+                  <th>Status</th>
+                  <th>Progress</th>
+                </tr>
+              </thead>
+              <tbody id="recent-jobs-body">
+                <tr><td colspan="4" style="text-align:center;padding:16px;color:var(--text-muted)">Loading jobs...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+
+    <!-- ══════════════════════════════════════════════════════════════════════
+         SECTION 2: READER ROLE EXPERIENCE (BROWSE, SIMILAR ARTICLES, SEARCH)
+         ══════════════════════════════════════════════════════════════════════ -->
+    <div id="reader-view" class="role-view hidden">
+      <div class="body-wrap">
+
+        <!-- ── LEFT SIDEBAR ── -->
+        <aside class="sidebar" id="sidebar">
+          <div class="sidebar-inner">
+
+            <!-- RecSys Controls -->
+            <section class="sidebar-section">
+              <div class="sidebar-section-header">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+                <span>RecSys Controls</span>
+              </div>
+
+              <div class="control-group">
+                <label class="control-label">Recommendations Count</label>
+                <div class="slider-row">
+                  <input type="range" id="top-k-slider" min="3" max="15" value="10" class="slider" />
+                  <span class="slider-value" id="top-k-value">10</span>
+                </div>
+                <div class="slider-ticks"><span>3</span><span>15</span></div>
+              </div>
+
+              <div class="control-group">
+                <label class="control-label">Category Filter</label>
+                <select id="section-filter" class="select-input">
+                  <option value="">All</option>
+                </select>
+              </div>
+            </section>
+
+            <!-- Advanced Engine Specs -->
+            <section class="sidebar-section">
+              <details class="collapsible">
+                <summary class="collapsible-header">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+                  <span>Engine Architecture</span>
+                  <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                </summary>
+                <div class="collapsible-body">
+                  <div class="control-group">
+                    <label class="control-label">Retrieval Method</label>
+                    <select id="method-select" class="select-input">
+                      <option value="hybrid+rerank">hybrid+rerank</option>
+                      <option value="hybrid">hybrid</option>
+                      <option value="semantic">semantic</option>
+                      <option value="bm25">bm25</option>
+                    </select>
+                  </div>
+                  <div class="toggle-row">
+                    <label class="toggle-label">Recency &amp; Section Boosts</label>
+                    <label class="toggle">
+                      <input type="checkbox" id="use-boosts" checked />
+                      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                  </div>
+                  <div class="toggle-row">
+                    <label class="toggle-label">MMR Diversity</label>
+                    <label class="toggle">
+                      <input type="checkbox" id="use-diversity" checked />
+                      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                  </div>
+                </div>
+              </details>
+            </section>
+
+            <!-- Engine Info -->
+            <section class="sidebar-section">
+              <div class="engine-info" id="engine-info">
+                <div class="engine-stat">
+                  <span class="engine-stat-label">Source</span>
+                  <span class="engine-stat-value" id="engine-name">PostgreSQL Live</span>
+                </div>
+                <div class="engine-stat">
+                  <span class="engine-stat-label">Indexed Articles</span>
+                  <span class="engine-stat-value" id="total-articles">—</span>
+                </div>
+              </div>
+            </section>
+
+            <!-- Engine Badge -->
+            <div class="ai-learn-badge">
+              <span class="ai-badge-icon">✦</span>
+              <div>
+                <strong>PostgreSQL + pgvector</strong><br/>
+                <small>Sub-5ms Precomputed Recommendations</small>
+              </div>
             </div>
 
-            <div class="control-group">
-              <label class="control-label">Category Filter</label>
-              <select id="section-filter" class="select-input">
-                <option value="">All</option>
+          </div>
+        </aside>
+
+        <!-- ── MAIN CONTENT ── -->
+        <main class="main-content">
+
+          <!-- Database Empty Banner in Reader Mode -->
+          <div class="reader-empty-banner hidden" id="reader-empty-banner">
+            <h2>PostgreSQL Database is Empty</h2>
+            <p>No articles have been indexed into PostgreSQL yet. Switch to the Editor Studio to upload or ingest your news dataset.</p>
+            <button class="btn btn-primary" id="btn-empty-goto-editor">
+              ✍️ Go to Editor Studio to Ingest Articles
+            </button>
+          </div>
+
+          <!-- Hero Carousel -->
+          <section class="hero-section" id="hero-section">
+            <div class="hero-carousel" id="hero-carousel">
+              <div class="hero-loading">
+                <div class="skeleton skeleton-hero"></div>
+              </div>
+            </div>
+            <div class="hero-nav">
+              <button class="hero-btn" id="hero-prev" aria-label="Previous">&#8592;</button>
+              <div class="hero-dots" id="hero-dots"></div>
+              <button class="hero-btn" id="hero-next" aria-label="Next">&#8594;</button>
+            </div>
+          </section>
+
+          <!-- Tabs -->
+          <nav class="tabs-nav" id="tabs-nav">
+            <button class="tab-btn active" data-tab="similar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Similar Articles
+            </button>
+            <button class="tab-btn" data-tab="search">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              Semantic Search
+            </button>
+          </nav>
+
+          <!-- Tab: Similar Articles -->
+          <section class="tab-panel active" id="tab-similar">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/></svg>
+                  Item-to-Item Recommendations
+                </h2>
+                <p class="panel-sub">Select an article to view its top 10 recommended stories (served directly from PostgreSQL in &lt; 5ms)</p>
+              </div>
+            </div>
+            <div class="article-picker-wrap">
+              <label class="control-label">Select an Article:</label>
+              <select id="article-picker" class="select-input select-lg">
+                <option value="">Loading articles from PostgreSQL…</option>
               </select>
             </div>
+            <div id="selected-article-preview" class="selected-preview hidden"></div>
+            <div class="divider-label">Related Recommended Articles (PostgreSQL Precomputed Table)</div>
+            <div id="similar-results-grid" class="cards-grid"></div>
           </section>
 
-          <!-- Advanced Engine Specs -->
-          <section class="sidebar-section">
-            <details class="collapsible">
-              <summary class="collapsible-header">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                <span>Advanced Engine Specs</span>
-                <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              </summary>
-              <div class="collapsible-body">
-                <div class="control-group">
-                  <label class="control-label">Retrieval Method</label>
-                  <select id="method-select" class="select-input">
-                    <option value="hybrid+rerank">hybrid+rerank</option>
-                    <option value="hybrid">hybrid</option>
-                    <option value="semantic">semantic</option>
-                    <option value="bm25">bm25</option>
-                  </select>
-                </div>
-                <div class="toggle-row">
-                  <label class="toggle-label">Recency &amp; Section Boosts</label>
-                  <label class="toggle">
-                    <input type="checkbox" id="use-boosts" checked />
-                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                  </label>
-                </div>
-                <div class="toggle-row">
-                  <label class="toggle-label">MMR Diversity</label>
-                  <label class="toggle">
-                    <input type="checkbox" id="use-diversity" checked />
-                    <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                  </label>
-                </div>
+          <!-- Tab: Search -->
+          <section class="tab-panel" id="tab-search">
+            <div class="panel-header">
+              <div>
+                <h2 class="panel-title">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                  Semantic Search
+                </h2>
+                <p class="panel-sub">Search articles in PostgreSQL by concept, event, or keyword</p>
               </div>
-            </details>
-          </section>
+            </div>
 
-          <!-- Engine Info -->
-          <section class="sidebar-section">
-            <div class="engine-info" id="engine-info">
-              <div class="engine-stat">
-                <span class="engine-stat-label">Engine</span>
-                <span class="engine-stat-value" id="engine-name">Loading…</span>
+            <div class="search-panel">
+              <div class="search-input-wrap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <input type="text" id="search-query-input" placeholder="e.g. Virat Kohli, Akhilesh Yadav, Supreme Court, Budget 2025…" autocomplete="off" />
+                <button class="btn btn-primary" id="search-btn">Search</button>
               </div>
-              <div class="engine-stat">
-                <span class="engine-stat-label">Indexed Articles</span>
-                <span class="engine-stat-value" id="total-articles">—</span>
+              <div class="quick-pills" id="quick-pills">
+                <span class="pill" data-q="Akhilesh Yadav UP politics">🗳️ Akhilesh Yadav</span>
+                <span class="pill" data-q="Virat Kohli cricket centuries">🏏 Virat Kohli</span>
+                <span class="pill" data-q="Supreme Court Election Commission">⚖️ Supreme Court</span>
+                <span class="pill" data-q="Asian Games gold medals India">🥇 Asian Games</span>
+                <span class="pill" data-q="India budget economy">💰 Budget 2025</span>
+                <span class="pill" data-q="technology innovation India">💻 Technology</span>
               </div>
+            </div>
+
+            <div id="search-results-container" class="hidden">
+              <div class="result-meta" id="search-result-meta"></div>
+              <div id="search-results-grid" class="cards-grid"></div>
+            </div>
+            <div id="search-empty" class="empty-state hidden">
+              <div class="empty-icon">🔍</div>
+              <h3>No results found</h3>
+              <p>Try different keywords or check spelling</p>
             </div>
           </section>
 
-          <!-- Engine Badge -->
-          <div class="ai-learn-badge">
-            <span class="ai-badge-icon">✦</span>
-            <div>
-              <strong>Hybrid Search &amp; Ranking</strong><br/>
-              <small>Neural embeddings + BM25 + Cross-Encoder reranker</small>
+        </main>
+
+        <!-- ── RIGHT PANEL ── -->
+        <aside class="right-panel">
+
+          <!-- Discovery Modes Info -->
+          <div class="rp-card">
+            <div class="rp-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+              <span>Reader Modes</span>
+            </div>
+            <p class="rp-card-sub" style="margin-bottom:0.75rem;">Explore recommendation discovery:</p>
+            <div style="font-size:0.83rem;color:var(--text-secondary);display:flex;flex-direction:column;gap:0.6rem;">
+              <div><strong style="color:var(--text-primary)">1. Similar Articles:</strong> Precomputed top-10 fetched from PostgreSQL in sub-5ms.</div>
+              <div><strong style="color:var(--text-primary)">2. Semantic Search:</strong> Hybrid retrieval combining keyword matching and vector search.</div>
+              <div><strong style="color:var(--text-primary)">3. Editor Studio:</strong> Ingest new CSVs and monitor pgvector pipelines.</div>
             </div>
           </div>
 
-        </div>
-      </aside>
-
-      <!-- ── MAIN CONTENT ── -->
-      <main class="main-content">
-
-        <!-- Hero Carousel -->
-        <section class="hero-section" id="hero-section">
-          <div class="hero-carousel" id="hero-carousel">
-            <div class="hero-loading">
-              <div class="skeleton skeleton-hero"></div>
+          <!-- Filter by Category -->
+          <div class="rp-card">
+            <div class="rp-card-header">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+              <span>Filter by Category</span>
+              <span class="rp-view-all" id="rp-view-all">View all →</span>
             </div>
-          </div>
-          <div class="hero-nav">
-            <button class="hero-btn" id="hero-prev" aria-label="Previous">&#8592;</button>
-            <div class="hero-dots" id="hero-dots"></div>
-            <button class="hero-btn" id="hero-next" aria-label="Next">&#8594;</button>
-          </div>
-        </section>
-
-        <!-- Tabs -->
-        <nav class="tabs-nav" id="tabs-nav">
-          <button class="tab-btn active" data-tab="similar">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-            Similar Articles
-          </button>
-          <button class="tab-btn" data-tab="search">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-            Semantic Search
-          </button>
-        </nav>
-
-        <!-- Tab: Similar Articles -->
-        <section class="tab-panel active" id="tab-similar">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/></svg>
-                Item-to-Item Recommendations
-              </h2>
-              <p class="panel-sub">Find articles similar to a selected story</p>
-            </div>
-          </div>
-          <div class="article-picker-wrap">
-            <label class="control-label">Select an Article:</label>
-            <select id="article-picker" class="select-input select-lg">
-              <option value="">Loading articles…</option>
-            </select>
-          </div>
-          <div id="selected-article-preview" class="selected-preview hidden"></div>
-          <div class="divider-label">Related Recommended Articles</div>
-          <div id="similar-results-grid" class="cards-grid"></div>
-        </section>
-
-        <!-- Tab: Search -->
-        <section class="tab-panel" id="tab-search">
-          <div class="panel-header">
-            <div>
-              <h2 class="panel-title">
-                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-                Semantic Search
-              </h2>
-              <p class="panel-sub">Search articles by concept, event, or keyword — typos are auto-corrected</p>
+            <div class="category-pills" id="category-pills">
+              <button class="cat-pill active" data-section="">All</button>
             </div>
           </div>
 
-          <div class="search-panel">
-            <div class="search-input-wrap">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="20" height="20"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-              <input type="text" id="search-query-input" placeholder="e.g. akkhhlesh, Virat Kohli, Supreme Court ECI, budget 2025…" autocomplete="off" />
-              <button class="btn btn-primary" id="search-btn">Search</button>
-            </div>
-            <div class="quick-pills" id="quick-pills">
-              <span class="pill" data-q="Akhilesh Yadav UP politics">🗳️ Akhilesh Yadav</span>
-              <span class="pill" data-q="Virat Kohli cricket centuries">🏏 Virat Kohli</span>
-              <span class="pill" data-q="Supreme Court Election Commission">⚖️ Supreme Court</span>
-              <span class="pill" data-q="Asian Games gold medals India">🥇 Asian Games</span>
-              <span class="pill" data-q="India budget economy">💰 Budget 2025</span>
-              <span class="pill" data-q="technology innovation India">💻 Technology</span>
-            </div>
-          </div>
+        </aside>
 
-          <div id="search-results-container" class="hidden">
-            <div class="result-meta" id="search-result-meta"></div>
-            <div id="search-results-grid" class="cards-grid"></div>
-          </div>
-          <div id="search-empty" class="empty-state hidden">
-            <div class="empty-icon">🔍</div>
-            <h3>No results found</h3>
-            <p>Try different keywords or check spelling</p>
-          </div>
-        </section>
-
-      </main>
-
-      <!-- ── RIGHT PANEL ── -->
-      <aside class="right-panel">
-
-        <!-- Discovery Modes Info -->
-        <div class="rp-card">
-          <div class="rp-card-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-            <span>Discovery Modes</span>
-          </div>
-          <p class="rp-card-sub" style="margin-bottom:0.75rem;">Explore our two core recommendation modes:</p>
-          <div style="font-size:0.83rem;color:var(--text-secondary);display:flex;flex-direction:column;gap:0.6rem;">
-            <div><strong style="color:var(--text-primary)">1. Similar Articles:</strong> Item-to-item neural matching based on content embeddings.</div>
-            <div><strong style="color:var(--text-primary)">2. Semantic Search:</strong> Hybrid retrieval combining BM25 keyword matching and dense vector search with Cross-Encoder reranking.</div>
-          </div>
-        </div>
-
-        <!-- Filter by Category -->
-        <div class="rp-card">
-          <div class="rp-card-header">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
-            <span>Filter by Category</span>
-            <span class="rp-view-all" id="rp-view-all">View all →</span>
-          </div>
-          <div class="category-pills" id="category-pills">
-            <button class="cat-pill active" data-section="">All</button>
-          </div>
-        </div>
-
-      </aside>
-
+      </div>
     </div>
+
   </div>
 
   <script src="js/api.js"></script>
@@ -298,6 +555,7 @@
   <script src="js/ui.js"></script>
   <script src="js/hero.js"></script>
   <script src="js/tabs.js"></script>
+  <script src="js/editor.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

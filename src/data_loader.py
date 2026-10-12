@@ -12,6 +12,7 @@ Cleaning rules:
   6. shorten very long descriptions (video descriptions can be 1,000+ characters)
 """
 import json
+from pathlib import Path
 import re
 import unicodedata
 from collections import Counter
@@ -103,9 +104,30 @@ def _short_description(text: str, limit: int = 300) -> str:
     return text[:limit].rsplit(" ", 1)[0] + "..."
 
 
-def load_articles(path=config.DATA_PATH) -> pd.DataFrame:
-    raw = pd.read_csv(path)
-    raw = raw.drop_duplicates(subset="articleId", keep="first").reset_index(drop=True)
+def load_articles(paths=None) -> pd.DataFrame:
+    if paths is None:
+        paths = getattr(config, "DATA_PATHS", [config.DATA_PATH])
+    elif isinstance(paths, (list, tuple)):
+        paths = paths
+    else:
+        paths = [paths]
+
+    dfs = []
+    for p in paths:
+        p_obj = Path(p)
+        if p_obj.exists():
+            print(f"[DataLoader] Loading {p_obj.name}...")
+            dfs.append(pd.read_csv(p_obj))
+        else:
+            print(f"[DataLoader] Warning: {p_obj} does not exist, skipping.")
+
+    if not dfs:
+        raise FileNotFoundError(f"No valid CSV dataset files found in {paths}")
+
+    raw = pd.concat(dfs, ignore_index=True)
+    n_raw = len(raw)
+    raw = raw.drop_duplicates(subset="articleId", keep="last").reset_index(drop=True)
+    print(f"[DataLoader] Cleaned: {n_raw} total rows merged -> {len(raw)} unique articles.")
 
     ids = raw["articleId"].tolist()
     titles = raw["articleTitle"].map(normalise_text)
@@ -122,19 +144,28 @@ def load_articles(path=config.DATA_PATH) -> pd.DataFrame:
     boilerplate = _find_boilerplate(bodies)
     bodies = [_strip_boilerplate(b, boilerplate) for b in bodies]
 
+    # Flexible column resolution across different dataset formats
+    sec_series = raw["sectionName"] if "sectionName" in raw.columns else (raw["section1Slug"] if "section1Slug" in raw.columns else pd.Series([""] * len(raw)))
+    subsec_series = raw["section2Name"].map(_subsection) if "section2Name" in raw.columns else (raw["section2Slug"] if "section2Slug" in raw.columns else pd.Series([""] * len(raw)))
+    pv_series = raw["pageViews"] if "pageViews" in raw.columns else (raw["pageViews_latest"] if "pageViews_latest" in raw.columns else (raw["pageViews_max"] if "pageViews_max" in raw.columns else pd.Series([0] * len(raw))))
+    uu_series = raw["uniqueUsers"] if "uniqueUsers" in raw.columns else (raw["uniqueUsers_latest"] if "uniqueUsers_latest" in raw.columns else (raw["uniqueUsers_max"] if "uniqueUsers_max" in raw.columns else pd.Series([0] * len(raw))))
+
     df = pd.DataFrame({
         "id": ids,
         "title": titles,
         "description": descriptions,
-        "section": raw["sectionName"].fillna(""),
-        "subsection": raw["section2Name"].map(_subsection),
-        "date": pd.to_datetime(raw["postPublishDate"], utc=True, errors="coerce"),
-        "url": raw["articleUrl"].fillna(""),
-        "image": raw["articleFeaturedImage"].fillna(""),
-        "is_live": raw["liveBlog"].fillna(False).astype(bool),
+        "section": sec_series.fillna(""),
+        "subsection": subsec_series.fillna(""),
+        "date": pd.to_datetime(raw["postPublishDate"], utc=True, errors="coerce") if "postPublishDate" in raw.columns else pd.Series([None] * len(raw)),
+        "url": raw["articleUrl"].fillna("") if "articleUrl" in raw.columns else "",
+        "image": raw["articleFeaturedImage"].fillna("") if "articleFeaturedImage" in raw.columns else "",
+        "is_live": raw["liveBlog"].fillna(False).astype(bool) if "liveBlog" in raw.columns else False,
         "body": bodies,
         "linked_ids": linked_ids,      # editor-chosen "also read" articles (used for evaluation)
+        "pageViews": pv_series.fillna(0).astype(int),
+        "uniqueUsers": uu_series.fillna(0).astype(int),
     })
+
 
     # Text used by the semantic search and as the "query" when an article is the input:
     df["text_embed"] = [

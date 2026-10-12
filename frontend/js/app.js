@@ -193,10 +193,62 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // 3. Initialize Hero Carousel
     if (loadingText) loadingText.textContent = 'Loading top trending stories...';
-    await Hero.init();
+    try { await Hero.init(); } catch(e) { console.warn('Hero init skipped:', e.message); }
 
     // 4. Initialize Tabs
     Tabs.init();
+
+    // 5. Initialize Editor & PostgreSQL Pipeline Hub (Editor is a const, always available)
+    await Editor.init();
+
+    // 6. Role Switcher Controller (Editor vs Reader)
+    const roleEditorBtn = document.getElementById('role-btn-editor');
+    const roleReaderBtn = document.getElementById('role-btn-reader');
+    const editorView = document.getElementById('editor-view');
+    const readerView = document.getElementById('reader-view');
+    const readerEmptyBanner = document.getElementById('reader-empty-banner');
+    const btnEmptyGotoEditor = document.getElementById('btn-empty-goto-editor');
+
+    function checkReaderDatabaseState() {
+      const isDbEmpty = !statusData || statusData.database_empty || statusData.total_articles === 0;
+      if (readerEmptyBanner) {
+        readerEmptyBanner.classList.toggle('hidden', !isDbEmpty);
+      }
+      const heroSection = document.getElementById('hero-section');
+      const tabsNav = document.getElementById('tabs-nav');
+      const similarPanel = document.getElementById('tab-similar');
+      if (heroSection) heroSection.style.display = isDbEmpty ? 'none' : '';
+      if (tabsNav) tabsNav.style.display = isDbEmpty ? 'none' : '';
+      if (similarPanel) similarPanel.style.display = isDbEmpty ? 'none' : '';
+    }
+
+    function setAppRole(role) {
+      const isEditor = role === 'editor';
+      if (roleEditorBtn) roleEditorBtn.classList.toggle('active', isEditor);
+      if (roleReaderBtn) roleReaderBtn.classList.toggle('active', !isEditor);
+      if (editorView) editorView.classList.toggle('hidden', !isEditor);
+      if (readerView) readerView.classList.toggle('hidden', isEditor);
+      localStorage.setItem('app_role', role);
+
+      if (isEditor) {
+        Editor.refreshDbHealth();
+      } else {
+        checkReaderDatabaseState();
+        Tabs.populateArticlePicker();
+      }
+    }
+
+    window.setAppRole = setAppRole;
+
+    if (roleEditorBtn) roleEditorBtn.addEventListener('click', () => setAppRole('editor'));
+    if (roleReaderBtn) roleReaderBtn.addEventListener('click', () => setAppRole('reader'));
+    if (btnEmptyGotoEditor) btnEmptyGotoEditor.addEventListener('click', () => setAppRole('editor'));
+
+    // Default to editor if database is empty, otherwise restore saved role
+    const initialRole = (!statusData || statusData.database_empty || statusData.total_articles === 0)
+      ? 'editor'
+      : (localStorage.getItem('app_role') || 'editor');
+    setAppRole(initialRole);
 
     // Reveal App
     if (loadingOverlay) loadingOverlay.classList.add('fade-out');
@@ -205,6 +257,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     setTimeout(() => {
       if (loadingOverlay) loadingOverlay.remove();
     }, 400);
+
 
   } catch (err) {
     console.error('Failed to initialize app with backend:', err);

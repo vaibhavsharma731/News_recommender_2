@@ -22,6 +22,7 @@ from pydantic import BaseModel
 import config
 from src.data_loader import load_articles
 from src.recommender import METHODS, Recommender
+from api.editor_routes import router as editor_router
 
 # ─── App setup ──────────────────────────────────────────────────────────────
 app = FastAPI(
@@ -38,13 +39,68 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Globals (loaded once at startup) ───────────────────────────────────────
-print("[INFO] Loading articles...")
-df = load_articles(config.DATA_PATH)
-print("[INFO] Building recommender (loading embeddings & models)...")
-rec = Recommender(df)
-articles = rec.articles
-print(f"[READY] Engine ready: {rec.engine_summary} | {len(articles)} articles indexed")
+# Include Database and Editor Router
+app.include_router(editor_router)
+
+# ─── Globals & PostgreSQL Sync ───────────────────────────────────────────────
+from db.connection import SessionLocal
+from db.repository import ArticleRepository
+from db.models import Article
+
+rec: Optional[Recommender] = None
+articles: pd.DataFrame = pd.DataFrame()
+
+
+def reload_engine_from_postgres():
+    """Reads articles directly from PostgreSQL and builds the search engine index."""
+    global rec, articles
+    try:
+        with SessionLocal() as db:
+            count = ArticleRepository.count_articles(db)
+            if count > 0:
+                print(f"[INFO] Loading {count} articles directly from PostgreSQL...")
+                arts = db.query(Article).order_by(Article.date.desc()).all()
+                rows = []
+                for a in arts:
+                    rows.append({
+                        "id": str(a.id),
+                        "title": str(a.title),
+                        "description": str(a.description or ""),
+                        "section": str(a.section or ""),
+                        "subsection": str(a.subsection or ""),
+                        "date": a.date,
+                        "url": str(a.url or ""),
+                        "image": str(a.image or ""),
+                        "is_live": bool(a.is_live),
+                        "body": str(a.body or ""),
+                        "pageViews": int(a.page_views or 0),
+                        "uniqueUsers": int(a.unique_users or 0),
+                        "text_embed": str(a.text_embed or f"{a.title}. {a.description or ''}"),
+                    })
+                df_db = pd.DataFrame(rows)
+                df_db["text_bm25"] = [
+                    f"{t}. {t}. {t}. {d}. {b}"
+                    for t, d, b in zip(df_db.title, df_db.description, df_db.body)
+                ]
+                df_db["text_rerank"] = [
+                    f"{t}. {d}."
+                    for t, d in zip(df_db.title, df_db.description)
+                ]
+                rec = Recommender(df_db)
+                articles = rec.articles
+                print(f"[READY] Engine initialized directly from PostgreSQL: {len(articles)} articles!")
+            else:
+                print("[INFO] PostgreSQL articles table is currently empty. Ready for Editor upload.")
+                articles = pd.DataFrame()
+                rec = None
+    except Exception as e:
+        print(f"[DB Warning] Could not load from PostgreSQL: {e}")
+        articles = pd.DataFrame()
+        rec = None
+
+
+# Initial load directly from PostgreSQL
+reload_engine_from_postgres()
 
 
 # ─── Pydantic request/response models ──────────────────────────────────────
@@ -79,7 +135,7 @@ def _article_dict(a: dict) -> dict:
     return {
         "id":         _clean_str(a.get("id")),
         "title":      _clean_str(a.get("title")),
-        "snippet":    _clean_str(a.get("snippet")),
+        "snippet":    _clean_str(a.get("snippet") or a.get("description")),
         "section":    _clean_str(a.get("section")),
         "subsection": _clean_str(a.get("subsection")),
         "date":       _clean_str(a.get("date")),
@@ -117,7 +173,7 @@ def _row_to_dict(row) -> dict:
 def _result_json(result, method: str) -> dict:
     return {
         "method":         method,
-        "engine":         rec.engine_summary,
+        "engine":         rec.engine_summary if rec else "PostgreSQL Engine",
         "low_confidence": bool(result.low_confidence),
         "best_relevance": _clean_float(result.best_relevance),
         "notes":          list(result.notes) if result.notes else [],
@@ -136,14 +192,16 @@ def _result_json(result, method: str) -> dict:
 
 @app.get("/api/status")
 def status():
-    """Engine health-check + metadata."""
-    secs = sorted(articles["section"].dropna().unique().tolist())
+    """Engine health-check + metadata directly from PostgreSQL."""
+    total = int(len(articles)) if not articles.empty else 0
+    secs = sorted(articles["section"].dropna().unique().tolist()) if not articles.empty else []
     return {
-        "engine":         rec.engine_summary,
-        "total_articles": int(len(articles)),
+        "engine":         rec.engine_summary if rec else "PostgreSQL Storage (Awaiting Dataset Ingestion)",
+        "total_articles": total,
+        "database_empty": total == 0,
         "methods":        METHODS,
         "sections":       secs,
-        "notes":          rec.notes,
+        "notes":          rec.notes if rec else ["PostgreSQL is active. Upload a dataset in Editor Studio to index articles."],
         "config": {
             "top_k":        config.TOP_K,
             "n_retrieve":   config.N_RETRIEVE,
@@ -161,51 +219,66 @@ def get_articles(
     section: str = Query(""),
     sort: str = Query("date"),
 ):
-    """Return a paginated list of articles."""
-    df_view = articles.copy()
-    if section:
-        df_view = df_view[df_view["section"] == section]
-
-    if sort == "date":
-        df_view = df_view.sort_values("date", ascending=False)
-
-    total = len(df_view)
-    start = (page - 1) * per_page
-    end = start + per_page
-    page_df = df_view.iloc[start:end]
-
-    return {
-        "total":    total,
-        "page":     page,
-        "per_page": per_page,
-        "articles": [_row_to_dict(row) for _, row in page_df.iterrows()],
-    }
+    """Return a paginated list of articles from PostgreSQL."""
+    try:
+        with SessionLocal() as db:
+            total = ArticleRepository.count_articles(db)
+            if total == 0:
+                return {
+                    "total": 0,
+                    "page": page,
+                    "per_page": per_page,
+                    "articles": [],
+                    "database_empty": True
+                }
+            start = (page - 1) * per_page
+            arts = ArticleRepository.list_articles(
+                db, limit=per_page, offset=start, section=section or None
+            )
+            return {
+                "total": total,
+                "page": page,
+                "per_page": per_page,
+                "articles": [a.to_dict() for a in arts],
+                "database_empty": False
+            }
+    except Exception as e:
+        print(f"Error listing articles: {e}")
+        return {"total": 0, "page": page, "per_page": per_page, "articles": [], "error": str(e)}
 
 
 @app.get("/api/articles/trending")
 def trending(n: int = Query(6, ge=1, le=20)):
-    """Return top-N most recent articles as trending stories."""
-    top_df = articles.sort_values("date", ascending=False).head(n)
-    return {
-        "articles": [_row_to_dict(row) for _, row in top_df.iterrows()]
-    }
+    """Return top-N most recent articles directly from PostgreSQL."""
+    try:
+        with SessionLocal() as db:
+            arts = ArticleRepository.list_articles(db, limit=n)
+            return {"articles": [a.to_dict() for a in arts]}
+    except Exception as e:
+        return {"articles": []}
 
 
 @app.get("/api/articles/{article_id}")
 def get_article(article_id: str):
-    """Fetch a single article by ID."""
-    match = articles[articles["id"].astype(str) == str(article_id)]
-    if match.empty:
-        raise HTTPException(status_code=404, detail="Article not found")
-    return _row_to_dict(match.iloc[0])
+    """Fetch a single article by ID directly from PostgreSQL."""
+    try:
+        with SessionLocal() as db:
+            art = ArticleRepository.get_article(db, str(article_id))
+            if not art:
+                raise HTTPException(status_code=404, detail="Article not found")
+            return art.to_dict()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/recommend")
 def recommend(body: RecommendRequest):
     """
-    Recommendation endpoint supporting two discovery modes:
-    1. query: Semantic/hybrid search
-    2. article_id: Item-to-item similar articles
+    Recommendation endpoint:
+    1. If article_id: Checks PostgreSQL precomputed recommendations first (sub-5ms)!
+    2. If not found or query provided: Uses Recommender search.
     """
     if not body.query and not body.article_id:
         raise HTTPException(
@@ -213,11 +286,42 @@ def recommend(body: RecommendRequest):
             detail="Please provide either 'query' (for search) or 'article_id' (for similar articles)."
         )
 
+    # 1. Fast sub-5ms path: Check PostgreSQL precomputed recommendations
+    if body.article_id:
+        try:
+            with SessionLocal() as db:
+                precomputed = ArticleRepository.get_precomputed_recommendations(
+                    db, str(body.article_id), limit=body.top_k
+                )
+                if precomputed:
+                    return {
+                        "method": "postgresql_precomputed_rerank",
+                        "engine": "PostgreSQL pgvector + Precomputed Cross-Encoder",
+                        "source": "postgresql",
+                        "low_confidence": False,
+                        "best_relevance": precomputed[0].get("score", 0.0),
+                        "notes": ["⚡ Served directly from PostgreSQL precomputed table (sub-5ms)"],
+                        "recommendations": [
+                            {
+                                "article": _article_dict(r),
+                                "score": r.get("score", 0.0),
+                                "reason": f"Rank #{r.get('rank', 1)} Precomputed via pgvector & Cross-Encoder"
+                            }
+                            for r in precomputed
+                        ]
+                    }
+        except Exception as e:
+            print(f"Error checking precomputed recommendations: {e}")
+
+    # 2. Fallback to search engine if initialized
+    if rec is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Database has no articles indexed yet. Please upload a dataset in the Editor Studio."
+        )
+
     try:
         aid = int(body.article_id) if (body.article_id and str(body.article_id).isdigit()) else body.article_id
-        if aid is not None and aid not in rec.id_to_pos and str(aid) not in rec.id_to_pos:
-            raise HTTPException(status_code=404, detail="Article ID not found in index")
-
         result = rec.recommend(
             query=body.query,
             article_id=aid,
@@ -228,19 +332,23 @@ def recommend(body: RecommendRequest):
             section=body.section,
         )
         return _result_json(result, body.method)
-    except HTTPException:
-        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.get("/api/sections")
 def sections():
-    """Return all distinct section names."""
-    secs = sorted(articles["section"].dropna().unique().tolist())
-    return {"sections": secs}
+    """Return all distinct section names directly from PostgreSQL."""
+    try:
+        with SessionLocal() as db:
+            secs = ArticleRepository.get_sections(db)
+            return {"sections": secs}
+    except Exception:
+        secs = sorted(articles["section"].dropna().unique().tolist()) if not articles.empty and "section" in articles.columns else []
+        return {"sections": secs}
 
 
 # ─── Serve Frontend Static Files ────────────────────────────────────────────

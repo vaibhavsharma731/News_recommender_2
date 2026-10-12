@@ -5,3 +5,8 @@ sentence-transformers
 fastapi
 uvicorn[standard]
 python-dotenv
+sqlalchemy
+psycopg2-binary
+psycopg[binary]
+pgvector
+python-multipart

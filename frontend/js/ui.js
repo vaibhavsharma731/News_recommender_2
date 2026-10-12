@@ -49,6 +49,10 @@ function showToast(message, type = 'success', duration = 3500) {
   }, duration);
 }
 
+// Window namespace fallback for UI helpers
+window.UI = { showToast };
+
+
 // ─── Article Card ────────────────────────────────────────────────────────────
 function buildArticleCard(article, { score = null, reason = null, compact = false } = {}) {
   const card = document.createElement('div');

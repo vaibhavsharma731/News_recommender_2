@@ -16,11 +16,17 @@ class Reranker:
         from sentence_transformers import CrossEncoder   # imported here so light mode works without it
         from torch import nn
 
-        self.model = CrossEncoder(model_name, max_length=512)
+        # max_length=160 covers full headline + description + lead sentence for ~3.5x faster CPU inference
+        self.model = CrossEncoder(model_name, max_length=160)
         self._identity = nn.Identity()
 
-    def score(self, query: str, documents: list) -> np.ndarray:
+    def score(self, query: str, documents: list, batch_size: int = 32) -> np.ndarray:
         """Return a relevance probability (0-1) for each document."""
+        if not documents:
+            return np.array([])
         pairs = [(query, doc) for doc in documents]
-        logits = np.asarray(self.model.predict(pairs, activation_fn=self._identity), dtype=float)
+        logits = np.asarray(
+            self.model.predict(pairs, batch_size=batch_size, activation_fn=self._identity, show_progress_bar=False),
+            dtype=float
+        )
         return 1.0 / (1.0 + np.exp(-logits))

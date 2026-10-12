@@ -25,8 +25,13 @@ const Tabs = (() => {
       if (allArticlesCache.length === 0) {
         populateArticlePicker();
       }
+    } else if (tabName === 'editor') {
+      if (window.Editor) {
+        Editor.refreshDbHealth();
+      }
     }
   }
+
 
   // ─── SIMILAR ARTICLES TAB ───────────────────────────────────────────────────
   async function populateArticlePicker() {
@@ -234,3 +239,6 @@ const Tabs = (() => {
 
   return { init, switchTab, onArticleSelected, performSearch, populateArticlePicker, reloadCurrentTab };
 })();
+
+// Expose to window so app.js can detect and call Tabs methods
+window.Tabs = Tabs;

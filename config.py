@@ -6,7 +6,23 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-DATA_PATH = ROOT / "data" / "articles.csv"
+DATA_DIR = ROOT / "data"
+
+# Dataset sources to load and merge:
+# Loads both articles.csv and articles_2.csv by default if present.
+# Can also be customized via DATA_CSV environment variable (comma-separated).
+_env_csvs = os.getenv("DATA_CSV", "")
+if _env_csvs:
+    DATA_PATHS = [DATA_DIR / name.strip() for name in _env_csvs.split(",") if name.strip()]
+else:
+    _default_files = ["articles.csv", "articles_2.csv", "articles_clean_train_80.csv"]
+    DATA_PATHS = [DATA_DIR / f for f in _default_files if (DATA_DIR / f).exists()]
+    if not DATA_PATHS:
+        DATA_PATHS = [p for p in DATA_DIR.glob("*.csv") if "uploads" not in str(p)]
+    if not DATA_PATHS:
+        DATA_PATHS = [DATA_DIR / "articles.csv"]
+
+DATA_PATH = DATA_PATHS[0]                    # primary path for backward compatibility
 CACHE_DIR = ROOT / "data" / "cache"          # embeddings are saved here after the first run
 
 # --- Environment & HuggingFace authentication ---
@@ -48,6 +64,7 @@ USER_PROFILE_WEIGHT = 0.35  # blend weight for user history profile vector
 # --- News Metadata Boosts (Calibrated Multipliers) ---
 SECTION_BOOST_MULT = 1.08    # 8% multiplicative boost for same section
 SUBSECTION_BOOST_MULT = 1.05 # 5% multiplicative boost for same subsection
+POPULARITY_BOOST_MULT = 1.06 # up to 6% boost for popular articles (log-scaled pageViews)
 
 # --- Dynamic Recency Half-lives (in days) ---
 SECTION_HALF_LIVES = {

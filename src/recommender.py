@@ -9,6 +9,7 @@ Pipeline for every request:
   5. MMR                                    (avoid near-duplicate results)
   6. A short "why recommended" explanation
 """
+import math
 import re
 from dataclasses import dataclass, field
 
@@ -47,6 +48,7 @@ class Recommender:
             self.id_to_pos[aid] = i
             self.id_to_pos[str(aid)] = i
         self.notes = []
+        self._max_page_views = int(self.articles["pageViews"].max()) if "pageViews" in self.articles.columns else 1
 
         self.bm25 = BM25Index(self.articles["text_bm25"])
         self.semantic = self._build_semantic(use_neural)
@@ -157,14 +159,19 @@ class Recommender:
                 passages = self.articles["text_rerank"].iloc[candidates].tolist()
             rerank_scores = np.array(self.reranker.score(rerank_query, passages))
             
-            # Blend with normalized BM25 keyword score for query searches so entity presence is honored
+            # Blend with normalized BM25 keyword score so entity presence is honored
+            bm25_cand = bm25_scores[candidates]
+            bm25_max = bm25_cand.max() if len(bm25_cand) and bm25_cand.max() > 0 else 1.0
+            bm25_norm = bm25_cand / bm25_max
             if query_pos is None:
-                bm25_cand = bm25_scores[candidates]
-                bm25_max = bm25_cand.max() if len(bm25_cand) and bm25_cand.max() > 0 else 1.0
-                bm25_norm = bm25_cand / bm25_max
+                # Text query: semantic reranker is primary, BM25 supports entity matching
                 relevance = 0.65 * rerank_scores + 0.35 * bm25_norm
             else:
-                relevance = rerank_scores
+                # Article-to-article: reranker + semantic + keyword blend
+                sem_cand = semantic_scores[candidates]
+                sem_max = sem_cand.max() if len(sem_cand) and sem_cand.max() > 0 else 1.0
+                sem_norm = sem_cand / sem_max
+                relevance = 0.55 * rerank_scores + 0.30 * bm25_norm + 0.15 * sem_norm
             threshold = config.MIN_RELEVANCE["reranker"]
         elif method == "bm25":
             top = bm25_scores[candidates]
@@ -181,8 +188,8 @@ class Recommender:
         # --- 4. Personalization & News Boost Calibration -------------------
         final = np.array(relevance, dtype=float)
 
-        # Blend with User Profile Vector if present
-        if user_vector is not None and query_pos is not None:
+        # Blend with User Profile Vector if present (works for all modes: search, article, history)
+        if user_vector is not None:
             user_affinities = self.semantic.scores_for_vector(user_vector)[candidates]
             w = config.USER_PROFILE_WEIGHT
             final = (1 - w) * final + w * user_affinities
@@ -201,10 +208,11 @@ class Recommender:
         recommendations = []
         for i in order:
             pos = candidates[i]
+            rel_score = float(np.clip(relevance[i], 0.0, 1.0))
             recommendations.append(Recommendation(
                 article=self._to_dict(pos),
-                score=float(np.clip(relevance[i], 0.0, 1.0)),
-                reason=self._explain(query_text, query_pos, pos, user_history=user_history),
+                score=rel_score,
+                reason=self._explain(query_text, query_pos, pos, relevance_score=rel_score, user_history=user_history),
             ))
         return Result(recommendations, low_confidence, best_relevance, method, notes)
 
@@ -280,6 +288,14 @@ class Recommender:
             if a["subsection"] and a["subsection"] == b["subsection"]:
                 mult *= config.SUBSECTION_BOOST_MULT
 
+        # Popularity boost: log-scaled so viral articles get a mild boost, not dominance
+        page_views = b.get("pageViews", 0)
+        if page_views > 0:
+            log_views = math.log1p(page_views)
+            log_max = math.log1p(self._max_page_views)
+            pop_factor = 1.0 + (config.POPULARITY_BOOST_MULT - 1.0) * (log_views / log_max)
+            mult *= pop_factor
+
         if pd.notna(b["date"]):
             max_date = self.articles["date"].max()
             days_old = max(0.0, (max_date - b["date"]).total_seconds() / 86400.0)
@@ -308,14 +324,26 @@ class Recommender:
             remaining.remove(best)
         return selected
 
-    def _explain(self, query_text, query_pos, pos, user_history: list = None) -> str:
-        """Build a short human-readable reason."""
+    def _explain(self, query_text, query_pos, pos, relevance_score: float = 0.0, user_history: list = None) -> str:
+        """Build a short human-readable reason combining neural semantics and keyword topics."""
         parts = []
+
+        # 1. Neural Semantic Context Match
+        if relevance_score >= 0.85:
+            parts.append(f"Strong semantic match ({int(relevance_score * 100)}% context similarity)")
+        elif relevance_score >= 0.55:
+            parts.append(f"Semantic context match ({int(relevance_score * 100)}%)")
+
+        # 2. Shared Topics / Keywords
         if query_text:
             shared = set(tokenize(query_text)) & set(self.bm25.docs[pos])
             shared = sorted(shared, key=lambda t: -self.bm25.idf[t])[:4]
             if shared:
                 parts.append("shared topics: " + ", ".join(shared))
+            elif not any("semantic" in p.lower() for p in parts):
+                parts.append("thematic conceptual match")
+
+        # 3. Section and Temporal Affinity
         if query_pos is not None:
             a, b = self.articles.iloc[query_pos], self.articles.iloc[pos]
             if a["section"] and a["section"] == b["section"]:
@@ -326,7 +354,7 @@ class Recommender:
                     parts.append("published around the same time")
         elif user_history:
             parts.append("matches your recent reading interest")
-        return "; ".join(parts) if parts else "similar meaning to your interest"
+        return "; ".join(parts) if parts else "High semantic and topic relevance"
 
     def _to_dict(self, pos) -> dict:
         row = self.articles.iloc[pos]
