@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Editor Upload History Preview — throwaway</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/variables.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/editor.css" />
+  <style>
+    body { background: var(--bg-base); padding: 28px; }
+    .preview-wrap { max-width: 1000px; margin: 0 auto; }
+    .preview-note { font-size: .8rem; color: var(--text-muted); margin-bottom: 18px; }
+  </style>
+</head>
+<body>
+  <div class="preview-wrap">
+    <div class="preview-note">Static design preview (mock data, no backend). Delete this file anytime.</div>
+
+    <!-- Upload History & Status card (as added to the Editor) -->
+    <div class="inspector-card">
+      <div class="upload-card-header">
+        <div class="upload-card-title">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 8 12 12 14 14"/><circle cx="12" cy="12" r="10"/></svg>
+          Upload History &amp; Status
+        </div>
+      </div>
+
+      <div class="jobs-summary" id="jobs-summary">
+        <div class="jobs-summary-item"><span class="jobs-summary-value">6</span><span class="jobs-summary-label">Uploads</span></div>
+        <div class="jobs-summary-item"><span class="jobs-summary-value">1,240</span><span class="jobs-summary-label">Articles Ingested</span></div>
+        <div class="jobs-summary-item"><span class="jobs-summary-value">318</span><span class="jobs-summary-label">Old Recs Refreshed</span></div>
+        <div class="jobs-summary-item"><span class="jobs-summary-value">1</span><span class="jobs-summary-label">Failed</span></div>
+      </div>
+
+      <div class="rec-table-wrap">
+        <table class="rec-table">
+          <thead>
+            <tr>
+              <th style="width:130px;">When</th>
+              <th>File / Job</th>
+              <th style="width:110px;">Articles</th>
+              <th style="width:150px;">Old Recs Refreshed</th>
+              <th style="width:120px;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="font-size:0.78rem;color:var(--text-secondary);">13 Oct, 14:22</td>
+              <td><div class="job-file">oct_13_evening.csv</div><div class="job-id">job_demo_a1b2c3</div></td>
+              <td>100</td>
+              <td><span class="job-refresh-count">37</span></td>
+              <td><span class="stat-badge ready">completed</span></td>
+            </tr>
+            <tr>
+              <td style="font-size:0.78rem;color:var(--text-secondary);">13 Oct, 09:05</td>
+              <td><div class="job-file">morning_batch.csv</div><div class="job-id">job_9f8e7d6c</div></td>
+              <td>250</td>
+              <td><span class="job-refresh-count">104</span></td>
+              <td><span class="stat-badge ready">completed</span></td>
+            </tr>
+            <tr>
+              <td style="font-size:0.78rem;color:var(--text-secondary);">12 Oct, 18:40</td>
+              <td><div class="job-file">articles_clean_train_80.csv</div><div class="job-id">job_demo_x9y8z7</div></td>
+              <td>100</td>
+              <td><span class="job-refresh-count zero">—</span></td>
+              <td><span class="stat-badge ready">completed</span></td>
+            </tr>
+            <tr>
+              <td style="font-size:0.78rem;color:var(--text-secondary);">12 Oct, 11:12</td>
+              <td><div class="job-file">broken_rows.csv</div><div class="job-id">job_0011aabb</div></td>
+              <td>0/0</td>
+              <td><span class="job-refresh-count zero">—</span></td>
+              <td><span class="stat-badge error">failed</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pipeline diagram (6 nodes, mid-run) -->
+    <div class="pipeline-visualizer-card" style="margin-top:24px;">
+      <h3 style="font-size:1.1rem;font-weight:800;color:var(--text-primary);">⚡ Live Neural Pipeline Ingestion</h3>
+      <div class="pipeline-diagram">
+        <div class="pipeline-node done"><span class="node-icon">📂</span><span class="node-title">1. Parse CSV</span><span class="node-sub">Validate Schema</span><span class="node-status">✓ Done</span></div>
+        <div class="pipeline-connector">➜</div>
+        <div class="pipeline-node done"><span class="node-icon">🧹</span><span class="node-title">2. Clean &amp; Strip</span><span class="node-sub">Remove Boilerplate</span><span class="node-status">✓ Done</span></div>
+        <div class="pipeline-connector">➜</div>
+        <div class="pipeline-node done"><span class="node-icon">🐘</span><span class="node-title">3. PostgreSQL</span><span class="node-sub">Insert Articles</span><span class="node-status">✓ Done</span></div>
+        <div class="pipeline-connector">➜</div>
+        <div class="pipeline-node done"><span class="node-icon">🧬</span><span class="node-title">4. 768d Vectors</span><span class="node-sub">pgvector Embeddings</span><span class="node-status">✓ Done</span></div>
+        <div class="pipeline-connector">➜</div>
+        <div class="pipeline-node done"><span class="node-icon">🎯</span><span class="node-title">5. Rerank Top 10</span><span class="node-sub">Save Recs Table</span><span class="node-status">✓ Done</span></div>
+        <div class="pipeline-connector">➜</div>
+        <div class="pipeline-node active"><span class="node-icon">🔄</span><span class="node-title">6. Reverse Update</span><span class="node-sub">Refresh Old Recs</span><span class="node-status">⚡ Running...</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

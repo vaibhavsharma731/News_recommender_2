@@ -46,6 +46,15 @@ RERANK_MAX_LEN = 160
 PRECOMPUTE_CANDIDATES = 20  # fused candidates sent to the reranker during ingestion (matches live N_CANDIDATES)
 PRECOMPUTE_COMMIT_EVERY = 5 # progress update + DB commit every N articles
 
+# --- Incremental recommendation maintenance ---
+# When a new CSV is ingested:
+#   1. the NEW articles are precomputed against the WHOLE database, and
+#   2. for every EXISTING ("old") article that a new article is close to, we
+#      re-evaluate (O-centric) whether the new article deserves a slot in its top-K.
+# Old articles that no new article matches are left completely untouched.
+# Set to False to only precompute the uploaded batch (old lists stay frozen).
+INCREMENTAL_RECOMMENDATIONS = True
+
 # bge models work better when a SHORT search query gets this prefix (articles do not need it)
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 SHORT_QUERY_WORDS = 12                        # fewer words than this = "short query"

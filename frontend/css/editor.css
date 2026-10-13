@@ -262,7 +262,7 @@
 /* Pipeline Node */
 .pipeline-node {
   flex: 1;
-  min-width: 170px;
+  min-width: 148px;
   background: var(--bg-surface);
   border: 2px solid var(--border-default);
   border-radius: var(--radius-md);
@@ -459,4 +459,60 @@
   font-size: 0.9rem;
   max-width: 500px;
   margin: 0 auto 20px auto;
+}
+
+/* ─── Upload History Summary ─────────────────────────────────────────────── */
+.jobs-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.jobs-summary-item {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jobs-summary-value {
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--brand-primary);
+  line-height: 1.1;
+}
+
+.jobs-summary-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+/* Job row helpers */
+.job-file {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.job-id {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.job-refresh-count {
+  font-weight: 700;
+  color: var(--color-info);
+}
+
+.job-refresh-count.zero {
+  color: var(--text-muted);
+  font-weight: 500;
 }

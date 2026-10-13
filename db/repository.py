@@ -146,7 +146,11 @@ class ArticleRepository:
     ):
         """
         Atomically saves precomputed recommendations for an article.
-        recommendations: list of dicts with keys: 'recommended_article_id', 'rank', 'score', 'method', 'reason'
+        recommendations: list of dicts with keys:
+            'recommended_article_id', 'rank', 'score', 'rerank_score', 'method', 'reason'
+        'rerank_score' is the raw cross-encoder probability for this (source -> recommended)
+        pair, computed with the source article as the query. It is used by the incremental
+        reverse-push to compare a new article against an existing article's stored entries.
         """
         db.query(ArticleRecommendation).filter(
             ArticleRecommendation.article_id == article_id
@@ -159,12 +163,38 @@ class ArticleRepository:
                 recommended_article_id=item["recommended_article_id"],
                 rank=item["rank"],
                 score=item.get("score", 0.0),
+                rerank_score=item.get("rerank_score"),
                 method=item.get("method", "neural_hybrid_rerank"),
                 reason=item.get("reason", "High topic and semantic relevance"),
             )
             db.add(rec)
         if commit:
             db.commit()
+
+    @staticmethod
+    def get_precomputed_rows(
+        db: Session,
+        article_id: str,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Lightweight read of an article's own stored recommendations (no join).
+
+        Returns dicts with the ids, scores AND the raw rerank_score, which the
+        incremental reverse-push needs in order to merge new candidates into an
+        existing article's list.
+        """
+        rows = db.query(ArticleRecommendation).filter(
+            ArticleRecommendation.article_id == article_id
+        ).order_by(ArticleRecommendation.rank).limit(limit).all()
+        return [{
+            "recommended_article_id": r.recommended_article_id,
+            "rank": r.rank,
+            "score": r.score,
+            "rerank_score": r.rerank_score,
+            "method": r.method,
+            "reason": r.reason,
+        } for r in rows]
 
     @staticmethod
     def get_precomputed_recommendations(
@@ -189,6 +219,7 @@ class ArticleRepository:
             art_dict = art.to_dict()
             art_dict["rank"] = rec.rank
             art_dict["score"] = rec.score
+            art_dict["rerank_score"] = rec.rerank_score
             art_dict["method"] = rec.method
             art_dict["reason"] = rec.reason or "High topic and semantic relevance"
             results.append(art_dict)
@@ -238,6 +269,7 @@ class ArticleRepository:
         status: Optional[str] = None,
         total_articles: Optional[int] = None,
         processed_articles: Optional[int] = None,
+        refreshed_articles: Optional[int] = None,
         message: Optional[str] = None,
         error: Optional[str] = None
     ) -> Optional[IngestionJob]:
@@ -250,6 +282,8 @@ class ArticleRepository:
             job.total_articles = total_articles
         if processed_articles is not None:
             job.processed_articles = processed_articles
+        if refreshed_articles is not None:
+            job.refreshed_articles = refreshed_articles
         if message:
             job.message = message
         if error:
@@ -266,6 +300,30 @@ class ArticleRepository:
     @staticmethod
     def list_recent_jobs(db: Session, limit: int = 10) -> List[IngestionJob]:
         return db.query(IngestionJob).order_by(desc(IngestionJob.created_at)).limit(limit).all()
+
+    @staticmethod
+    def get_ingestion_summary(db: Session) -> Dict[str, Any]:
+        """Aggregate upload history: how many jobs and how many articles/recommendations."""
+        total_jobs = db.query(func.count(IngestionJob.id)).scalar() or 0
+        completed = db.query(func.count(IngestionJob.id)).filter(
+            IngestionJob.status == "completed"
+        ).scalar() or 0
+        failed = db.query(func.count(IngestionJob.id)).filter(
+            IngestionJob.status == "failed"
+        ).scalar() or 0
+        articles_ingested = db.query(func.coalesce(func.sum(IngestionJob.total_articles), 0)).filter(
+            IngestionJob.status == "completed"
+        ).scalar() or 0
+        refreshed_total = db.query(func.coalesce(func.sum(IngestionJob.refreshed_articles), 0)).filter(
+            IngestionJob.status == "completed"
+        ).scalar() or 0
+        return {
+            "total_jobs": int(total_jobs),
+            "completed_jobs": int(completed),
+            "failed_jobs": int(failed),
+            "articles_ingested": int(articles_ingested),
+            "refreshed_articles": int(refreshed_total),
+        }
 
     @staticmethod
     def get_active_job(db: Session) -> Optional[IngestionJob]:

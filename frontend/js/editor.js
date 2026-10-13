@@ -253,12 +253,21 @@ const Editor = (() => {
         if (job.status === 'completed') {
           stopPolling();
           setAllNodesDone();
+          const refreshed = job.refreshed_articles || 0;
           appendLog('🎉 [Success] All articles and top 10 recommendations stored in PostgreSQL.');
+          if (refreshed > 0) {
+            appendLog(`🔄 [Reverse Update] Refreshed recommendations for ${refreshed} existing article(s) that this upload affected.`);
+          }
 
           if (dom.completion) {
             dom.completion.classList.remove('hidden');
             const summary = document.getElementById('completion-summary-text');
-            if (summary) summary.textContent = `Indexed ${job.total_articles} articles in PostgreSQL with 768d vectors and top-10 precomputed recommendations.`;
+            if (summary) {
+              const refreshText = refreshed > 0
+                ? ` Also refreshed recommendations for ${refreshed} previously uploaded article(s).`
+                : ' No existing articles needed refreshing.';
+              summary.textContent = `Indexed ${job.total_articles} articles in PostgreSQL with 768d vectors and top-10 precomputed recommendations.${refreshText}`;
+            }
           }
 
           showToast('Pipeline Finished! Recommendations are ready in PostgreSQL.', 'success');
@@ -290,7 +299,7 @@ const Editor = (() => {
   }
 
   function resetPipelineNodes() {
-    ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank'].forEach(id => {
+    ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank', 'node-reverse'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'pipeline-node';
@@ -309,7 +318,8 @@ const Editor = (() => {
       'INDEX':     { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
       'PGVECTOR':  { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
       'RERANK':    { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
-      'COMPLETE':  { curr: null,           done: ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank'] },
+      'REVERSE':   { curr: 'node-reverse', done: ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank'] },
+      'COMPLETE':  { curr: null,           done: ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank', 'node-reverse'] },
     };
 
     const conf = stageMap[stage] || stageMap['PARSE'];
@@ -334,7 +344,7 @@ const Editor = (() => {
   }
 
   function setAllNodesDone() {
-    ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank'].forEach(id => {
+    ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank', 'node-reverse'].forEach(id => {
       const el = document.getElementById(id);
       if (el) {
         el.className = 'pipeline-node done';
@@ -383,14 +393,34 @@ const Editor = (() => {
   async function loadInspectorArticles() {
     if (!dom.inspectorSelect) return;
     try {
-      const data = await Api.articles({ page: 1, perPage: 100, sort: 'date' });
-      dom.inspectorSelect.innerHTML = '<option value="">-- Choose an article to inspect precomputed recs --</option>';
-      (data.articles || []).forEach(art => {
-        const opt = document.createElement('option');
-        opt.value = art.id;
-        opt.textContent = `[${art.section || 'General'}] ${art.title.slice(0, 80)}`;
-        dom.inspectorSelect.appendChild(opt);
-      });
+      dom.inspectorSelect.innerHTML = '<option value="">-- Loading all articles… --</option>';
+
+      const perPage = 100;
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = '-- Choose an article to inspect precomputed recs --';
+      dom.inspectorSelect.innerHTML = '';
+      dom.inspectorSelect.appendChild(placeholder);
+
+      // Page through the WHOLE article table so the dropdown is not capped.
+      let page = 1;
+      let total = Infinity;
+      let count = 0;
+      while (count < total && page <= 500) {
+        const data = await Api.articles({ page, perPage, sort: 'date' });
+        total = data.total || 0;
+        const arts = data.articles || [];
+        arts.forEach(art => {
+          const opt = document.createElement('option');
+          opt.value = art.id;
+          opt.textContent = `[${art.section || 'General'}] ${art.title.slice(0, 80)}`;
+          dom.inspectorSelect.appendChild(opt);
+        });
+        count += arts.length;
+        if (arts.length < perPage) break;   // last page reached
+        page += 1;
+      }
+      placeholder.textContent = `-- Choose an article to inspect precomputed recs (${count}) --`;
     } catch (e) {
       console.warn('Inspector list warning:', e);
     }
@@ -431,11 +461,34 @@ const Editor = (() => {
     }
   }
 
+  function formatWhen(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleString(undefined, {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+    });
+  }
+
   async function loadRecentJobs() {
+    const summaryEls = {
+      uploads:   document.getElementById('summary-uploads'),
+      articles:  document.getElementById('summary-articles'),
+      refreshed: document.getElementById('summary-refreshed'),
+      failed:    document.getElementById('summary-failed'),
+    };
+
     if (!dom.recentJobsBody) return;
     try {
       const data = await Api.recentJobs();
       const jobs = data.jobs || [];
+      const summary = data.summary || {};
+
+      // 1. Aggregate upload-history summary
+      if (summaryEls.uploads)   summaryEls.uploads.textContent   = summary.total_jobs ?? jobs.length;
+      if (summaryEls.articles)  summaryEls.articles.textContent  = (summary.articles_ingested || 0).toLocaleString();
+      if (summaryEls.refreshed) summaryEls.refreshed.textContent = (summary.refreshed_articles || 0).toLocaleString();
+      if (summaryEls.failed)    summaryEls.failed.textContent    = summary.failed_jobs || 0;
 
       const running = jobs.find(j => j.status === 'processing' || j.status === 'pending');
       if (running && !pollInterval) {
@@ -446,7 +499,7 @@ const Editor = (() => {
       }
 
       if (jobs.length === 0) {
-        dom.recentJobsBody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:14px;">No jobs recorded yet.</td></tr>';
+        dom.recentJobsBody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:14px;">No uploads recorded yet.</td></tr>';
         return;
       }
 
@@ -454,11 +507,19 @@ const Editor = (() => {
       jobs.forEach(job => {
         const tr = document.createElement('tr');
         const badgeClass = job.status === 'completed' ? 'ready' : (job.status === 'failed' ? 'error' : 'warning');
+        const refreshed = job.refreshed_articles || 0;
+        const articlesCell = job.status === 'completed'
+          ? `${job.total_articles}`
+          : `${job.processed_articles}/${job.total_articles || '?'}`;
         tr.innerHTML = `
-          <td style="font-family:monospace;font-weight:600;">${job.id}</td>
-          <td>${job.filename}</td>
+          <td style="font-size:0.78rem;color:var(--text-secondary);">${formatWhen(job.created_at)}</td>
+          <td>
+            <div class="job-file">${job.filename || '—'}</div>
+            <div class="job-id">${job.id}</div>
+          </td>
+          <td>${articlesCell}</td>
+          <td><span class="job-refresh-count ${refreshed > 0 ? '' : 'zero'}">${refreshed > 0 ? refreshed : '—'}</span></td>
           <td><span class="stat-badge ${badgeClass}">${job.status}</span></td>
-          <td>${job.progress_percent}%</td>
         `;
         dom.recentJobsBody.appendChild(tr);
       });

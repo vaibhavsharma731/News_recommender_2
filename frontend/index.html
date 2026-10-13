@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>News Recommender | Indian Express Discovery &amp; PostgreSQL Pipeline</title>
   <meta name="description" content="News recommendation engine built on Indian Express articles. Features an Editor Studio with PostgreSQL pgvector pipeline and a high-speed Reader View." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
@@ -175,7 +176,7 @@
               <h3 style="font-size:1.1rem;font-weight:800;color:var(--text-primary);display:flex;align-items:center;gap:8px;">
                 <span>⚡</span> Live Neural Pipeline Ingestion
               </h3>
-              <p style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">Real-time progress across cleaning, PostgreSQL insertion, 768d embedding generation, and cross-encoder reranking.</p>
+              <p style="font-size:0.82rem;color:var(--text-secondary);margin-top:2px;">Real-time progress across cleaning, PostgreSQL insertion, 768d embedding generation, cross-encoder reranking, and the reverse update that refreshes related existing articles.</p>
             </div>
             <div style="font-size:1.3rem;font-weight:800;color:var(--brand-primary);" id="visualizer-progress-pct">0%</div>
           </div>
@@ -186,7 +187,7 @@
           </div>
           <div class="progress-message" id="visualizer-status-msg" style="margin-bottom:20px;">Starting background worker...</div>
 
-          <!-- 5-Node Animated Pipeline Diagram -->
+          <!-- 6-Node Animated Pipeline Diagram -->
           <div class="pipeline-diagram">
             <div class="pipeline-node" id="node-parse">
               <span class="node-icon">📂</span>
@@ -220,6 +221,13 @@
               <span class="node-icon">🎯</span>
               <span class="node-title">5. Rerank Top 10</span>
               <span class="node-sub">Save Recs Table</span>
+              <span class="node-status">Waiting</span>
+            </div>
+            <div class="pipeline-connector">➜</div>
+            <div class="pipeline-node" id="node-reverse">
+              <span class="node-icon">🔄</span>
+              <span class="node-title">6. Reverse Update</span>
+              <span class="node-sub">Refresh Old Recs</span>
               <span class="node-status">Waiting</span>
             </div>
           </div>
@@ -288,26 +296,47 @@
           </div>
         </div>
 
-        <!-- 5. Recent Jobs History -->
+        <!-- 5. Upload History & Status -->
         <div class="inspector-card">
           <div class="upload-card-header">
             <div class="upload-card-title">
               <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><polyline points="12 8 12 12 14 14"/><circle cx="12" cy="12" r="10"/></svg>
-              Recent Ingestion Tasks
+              Upload History &amp; Status
             </div>
           </div>
+
+          <div class="jobs-summary" id="jobs-summary">
+            <div class="jobs-summary-item">
+              <span class="jobs-summary-value" id="summary-uploads">0</span>
+              <span class="jobs-summary-label">Uploads</span>
+            </div>
+            <div class="jobs-summary-item">
+              <span class="jobs-summary-value" id="summary-articles">0</span>
+              <span class="jobs-summary-label">Articles Ingested</span>
+            </div>
+            <div class="jobs-summary-item">
+              <span class="jobs-summary-value" id="summary-refreshed">0</span>
+              <span class="jobs-summary-label">Old Recs Refreshed</span>
+            </div>
+            <div class="jobs-summary-item">
+              <span class="jobs-summary-value" id="summary-failed">0</span>
+              <span class="jobs-summary-label">Failed</span>
+            </div>
+          </div>
+
           <div class="rec-table-wrap">
             <table class="rec-table">
               <thead>
                 <tr>
-                  <th>Job ID</th>
-                  <th>Filename</th>
-                  <th>Status</th>
-                  <th>Progress</th>
+                  <th style="width:130px;">When</th>
+                  <th>File / Job</th>
+                  <th style="width:110px;">Articles</th>
+                  <th style="width:150px;">Old Recs Refreshed</th>
+                  <th style="width:120px;">Status</th>
                 </tr>
               </thead>
               <tbody id="recent-jobs-body">
-                <tr><td colspan="4" style="text-align:center;padding:16px;color:var(--text-muted)">Loading jobs...</td></tr>
+                <tr><td colspan="5" style="text-align:center;padding:16px;color:var(--text-muted)">Loading jobs...</td></tr>
               </tbody>
             </table>
           </div>
@@ -335,12 +364,12 @@
               </div>
 
               <div class="control-group">
-                <label class="control-label">Recommendations Count</label>
+                <label class="control-label">Recommendations Count <span style="color:var(--text-muted);font-weight:500;">(precomputed)</span></label>
                 <div class="slider-row">
-                  <input type="range" id="top-k-slider" min="3" max="15" value="10" class="slider" />
+                  <input type="range" id="top-k-slider" min="1" max="10" value="10" class="slider" />
                   <span class="slider-value" id="top-k-value">10</span>
                 </div>
-                <div class="slider-ticks"><span>3</span><span>15</span></div>
+                <div class="slider-ticks"><span>1</span><span>10</span></div>
               </div>
 
               <div class="control-group">
@@ -363,10 +392,10 @@
                   <div class="control-group">
                     <label class="control-label">Retrieval Method</label>
                     <select id="method-select" class="select-input">
-                      <option value="hybrid+rerank">hybrid+rerank</option>
-                      <option value="hybrid">hybrid</option>
-                      <option value="semantic">semantic</option>
-                      <option value="bm25">bm25</option>
+                      <option value="hybrid+rerank">hybrid+rerank — ⚡ Precomputed</option>
+                      <option value="hybrid">hybrid — 🛰️ Live</option>
+                      <option value="semantic">semantic — 🛰️ Live</option>
+                      <option value="bm25">bm25 — 🛰️ Live</option>
                     </select>
                   </div>
                   <div class="toggle-row">
@@ -459,18 +488,23 @@
                   <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/></svg>
                   Item-to-Item Recommendations
                 </h2>
-                <p class="panel-sub">Select an article to view its top 10 recommended stories (served directly from PostgreSQL in &lt; 5ms)</p>
+                <p class="panel-sub">Scroll the feed to see each story together with its own recommendations. The ⚡/🛰️ chip on every block shows whether it was served precomputed or live.</p>
               </div>
             </div>
-            <div class="article-picker-wrap">
-              <label class="control-label">Select an Article:</label>
-              <select id="article-picker" class="select-input select-lg">
-                <option value="">Loading articles from PostgreSQL…</option>
-              </select>
+            <div class="feed-explainer">
+              <span class="feed-explainer-item">
+                <span class="source-chip source-chip-pre">⚡ Precomputed</span>
+                hybrid + rerank &mdash; served straight from the PostgreSQL table (sub-5ms)
+              </span>
+              <span class="feed-explainer-item">
+                <span class="source-chip source-chip-live">🛰️ Live</span>
+                bm25 / semantic / hybrid, or any changed filter &mdash; computed live by the engine
+              </span>
             </div>
-            <div id="selected-article-preview" class="selected-preview hidden"></div>
-            <div class="divider-label">Related Recommended Articles (PostgreSQL Precomputed Table)</div>
-            <div id="similar-results-grid" class="cards-grid"></div>
+            <div id="article-feed" class="article-feed"></div>
+            <div id="article-feed-sentinel" class="feed-sentinel">
+              <span class="feed-sentinel-text">Scroll for more stories…</span>
+            </div>
           </section>
 
           <!-- Tab: Search -->
@@ -525,7 +559,7 @@
             </div>
             <p class="rp-card-sub" style="margin-bottom:0.75rem;">Explore recommendation discovery:</p>
             <div style="font-size:0.83rem;color:var(--text-secondary);display:flex;flex-direction:column;gap:0.6rem;">
-              <div><strong style="color:var(--text-primary)">1. Similar Articles:</strong> Precomputed top-10 fetched from PostgreSQL in sub-5ms.</div>
+              <div><strong style="color:var(--text-primary)">1. Similar Articles:</strong> A scrolling feed of stories, each with its own recommendations. ⚡ Precomputed (hybrid+rerank) or 🛰️ Live (other modes).</div>
               <div><strong style="color:var(--text-primary)">2. Semantic Search:</strong> Hybrid retrieval combining keyword matching and vector search.</div>
               <div><strong style="color:var(--text-primary)">3. Editor Studio:</strong> Ingest new CSVs and monitor pgvector pipelines.</div>
             </div>

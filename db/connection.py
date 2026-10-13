@@ -119,6 +119,37 @@ def check_db_health() -> Dict[str, Any]:
     return health
 
 
+def ensure_schema() -> bool:
+    """
+    Idempotent, lightweight migrations for columns added after the first release.
+
+    ``Base.metadata.create_all`` only creates *missing tables*; it never adds a
+    column to a table that already exists. So new columns must be added here with
+    ``ADD COLUMN IF NOT EXISTS`` (safe to run on every startup / ingestion).
+    """
+    if not engine:
+        return False
+    try:
+        with engine.connect() as conn:
+            # Store the raw cross-encoder score per recommendation pair so the
+            # incremental reverse-push can compare fairly without re-scoring old lists.
+            conn.execute(text(
+                "ALTER TABLE article_recommendations "
+                "ADD COLUMN IF NOT EXISTS rerank_score DOUBLE PRECISION"
+            ))
+            # Track how many EXISTING articles each upload refreshed via reverse-push,
+            # so the Editor dashboard can show per-upload history.
+            conn.execute(text(
+                "ALTER TABLE ingestion_jobs "
+                "ADD COLUMN IF NOT EXISTS refreshed_articles INTEGER DEFAULT 0"
+            ))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"[DB Schema] Could not ensure schema: {e}")
+        return False
+
+
 def init_db():
     """
     Ensures the pgvector extension is created and all declared tables exist.
@@ -139,6 +170,7 @@ def init_db():
     # Import models so Base has them registered before create_all
     from . import models  # noqa
     Base.metadata.create_all(bind=engine)
+    ensure_schema()
     print("[DB Init] All database tables created successfully.")
     return True
 

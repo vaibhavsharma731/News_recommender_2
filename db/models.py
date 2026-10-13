@@ -111,7 +111,12 @@ class ArticleRecommendation(Base):
         index=True
     )
     rank = Column(Integer, nullable=False)   # 1 to 10
-    score = Column(Float, nullable=True)     # Reranker probability score (0.0 - 1.0)
+    score = Column(Float, nullable=True)     # Final blended relevance shown to the user (0.0 - 1.0)
+    # Raw cross-encoder probability for THIS (source -> recommended) pair, computed
+    # O-centrically (query = source article). It is the only score that is directly
+    # comparable across lists, so the incremental "reverse push" uses it to decide
+    # whether a newly ingested article can displace an old entry.
+    rerank_score = Column(Float, nullable=True)
     method = Column(String(50), default="neural_hybrid_rerank")
     reason = Column(Text, nullable=True)     # Human-readable explanation why recommended
     created_at = Column(DateTime, server_default=func.now())
@@ -135,8 +140,11 @@ class IngestionJob(Base):
     id = Column(String(64), primary_key=True)
     filename = Column(String(255), nullable=False)
     status = Column(String(50), default="pending")  # pending, processing, completed, failed
-    total_articles = Column(Integer, default=0)
+    total_articles = Column(Integer, default=0)      # articles in THIS upload
     processed_articles = Column(Integer, default=0)
+    # Number of EXISTING (previously uploaded) articles whose precomputed
+    # recommendations were refreshed by the incremental reverse-push from this job.
+    refreshed_articles = Column(Integer, default=0)
     message = Column(Text, nullable=True)
     error = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
@@ -147,13 +155,22 @@ class IngestionJob(Base):
         if self.total_articles and self.total_articles > 0:
             progress = round((self.processed_articles / self.total_articles) * 100, 1)
 
+        duration_seconds = None
+        if self.created_at and self.updated_at:
+            try:
+                duration_seconds = round((self.updated_at - self.created_at).total_seconds(), 1)
+            except Exception:
+                duration_seconds = None
+
         return {
             "id": self.id,
             "filename": self.filename,
             "status": self.status,
             "total_articles": self.total_articles,
             "processed_articles": self.processed_articles,
+            "refreshed_articles": self.refreshed_articles or 0,
             "progress_percent": progress,
+            "duration_seconds": duration_seconds,
             "message": self.message or "",
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else "",

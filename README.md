@@ -69,6 +69,54 @@ If the best score is below the threshold in `config.MIN_RELEVANCE`, the UI says
 "no close match found" instead of showing weak results confidently
 (this is what happens for "flight crash", because the dataset has no such article).
 
+## Incremental ingestion (adding articles later)
+
+Each upload stores the new articles and precomputes a top-10 for them. But what about the
+articles that were already there? Their precomputed lists would go stale (they could never
+recommend the new arrivals). The pipeline keeps them fresh with a **reverse push**:
+
+1. **New articles** are searched against the **whole database** (BM25 + semantic → RRF →
+   top-20 → cross-encoder rerank), not just the uploaded batch. So new articles can
+   recommend old ones.
+2. **Reverse push:** for every new article `N`, we look at the existing articles `O` that
+   `N` was close to. For each such `O` we score `rerank(O, N)` **with `O` as the query**
+   (O-centric), merge it into `O`'s current top-10 (reusing the stored `rerank_score` for
+   `O`'s existing entries), re-apply boosts + MMR and keep the top-10. If `N` is not good
+   enough it is simply ignored, and `O` keeps its old list.
+
+Only old articles that are genuinely close to a new article are touched — the rest are
+left completely alone, so the cost scales with the new batch, not the whole archive.
+
+This is controlled by `config.INCREMENTAL_RECOMMENDATIONS` (default `True`). Passing
+`recompute_all_recommendations=True` to `run_ingestion_pipeline` forces a full rebuild of
+every article's list instead (correct but slower).
+
+Every precomputed row now stores two scores:
+
+| Column | Meaning |
+|---|---|
+| `score` | final blended relevance shown in the UI (0–1) |
+| `rerank_score` | raw cross-encoder probability for this exact (source → recommended) pair, computed O-centrically — the comparable value the reverse push uses |
+
+Existing databases are migrated automatically: `db.connection.ensure_schema()` runs
+`ALTER TABLE article_recommendations ADD COLUMN IF NOT EXISTS rerank_score` on startup and
+before every ingestion.
+
+### Editor visibility into uploads
+
+The Editor dashboard has an **Upload History & Status** panel:
+
+* a summary tile row — total uploads, total articles ingested, total old
+  recommendations refreshed, and failed jobs;
+* one row per upload — when it ran, the file/job id, how many articles it contained,
+  how many **existing** articles the reverse push refreshed, and its status.
+
+During an upload the live pipeline log streams the reverse-push step as its own node
+(`6. Reverse Update`): how many existing articles are being re-scored and a sample of the
+affected article titles. The per-job count is stored in `ingestion_jobs.refreshed_articles`
+(auto-migrated with `ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS refreshed_articles
+INTEGER DEFAULT 0`).
+
 ## API Endpoints
 
 | Method | Path | Description |

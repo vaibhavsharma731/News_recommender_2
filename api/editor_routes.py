@@ -152,9 +152,13 @@ def get_job_status(job_id: str, db: Session = Depends(get_db)):
 
 @router.get("/jobs")
 def list_jobs(limit: int = 10, db: Session = Depends(get_db)):
-    """List recent ingestion jobs for the Editor dashboard."""
+    """List recent ingestion jobs (upload history) plus an aggregate summary for the Editor dashboard."""
     jobs = ArticleRepository.list_recent_jobs(db, limit=limit)
-    return {"jobs": [j.to_dict() for j in jobs]}
+    summary = ArticleRepository.get_ingestion_summary(db)
+    return {
+        "jobs": [j.to_dict() for j in jobs],
+        "summary": summary,
+    }
 
 
 @router.get("/recommendations/{article_id}")

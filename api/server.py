@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 import config
@@ -28,7 +28,7 @@ from src.data_loader import load_articles
 from src.recommender import METHODS, Recommender
 from api.editor_routes import router as editor_router
 
-from db.connection import SessionLocal
+from db.connection import SessionLocal, ensure_schema
 from db.repository import ArticleRepository
 from db.models import Article
 
@@ -38,6 +38,11 @@ _reload_lock = threading.Lock()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    try:
+        ensure_schema()  # idempotent: adds new columns to existing tables if needed
+    except Exception as e:
+        print(f"[Startup] Schema check skipped: {e}")
+
     try:
         with SessionLocal() as db:
             closed = ArticleRepository.fail_orphaned_jobs(db)
@@ -201,6 +206,9 @@ def _result_json(result, method: str) -> dict:
     return {
         "method":         method,
         "engine":         rec.engine_summary if rec else "PostgreSQL Engine",
+        # "postgresql" recommendations are served from the precomputed table (see
+        # /api/recommend); anything that reaches here was computed live in memory.
+        "source":         "live",
         "low_confidence": bool(result.low_confidence),
         "best_relevance": _clean_float(result.best_relevance),
         "notes":          list(result.notes) if result.notes else [],
@@ -386,6 +394,28 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 def serve_index():
     """Serve the frontend index.html."""
     return FileResponse(FRONTEND_DIR / "index.html")
+
+
+def _icon_response():
+    """Serve the SVG app icon, or a silent 204 if it is missing."""
+    icon = FRONTEND_DIR / "favicon.svg"
+    if icon.exists():
+        return FileResponse(icon, media_type="image/svg+xml")
+    return Response(status_code=204)
+
+
+@app.get("/favicon.svg", include_in_schema=False)
+def serve_favicon_svg():
+    return _icon_response()
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def serve_favicon():
+    """
+    Browsers request /favicon.ico automatically. Without a handler this logs a
+    noisy 404 on every page load, so we answer it with the SVG icon (or a 204).
+    """
+    return _icon_response()
 
 
 # Mount static dirs for CSS and JS

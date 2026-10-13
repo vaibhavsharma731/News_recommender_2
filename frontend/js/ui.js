@@ -154,10 +154,13 @@ function renderNotes(container, notes = [], lowConfidence = false) {
 
 // ─── Result Meta Bar ──────────────────────────────────────────────────────────
 function renderResultMeta(container, result) {
+  const pre = result.source === 'postgresql';
+  const sourceChip = `<span class="source-chip source-chip-${pre ? 'pre' : 'live'}">${pre ? '⚡ Precomputed' : '🛰️ Live'}</span>`;
   container.innerHTML = `
     <span>🔢 <strong>${result.recommendations.length}</strong> results</span>
     <span>🧠 Engine: <strong>${result.engine || ''}</strong></span>
     <span class="badge badge-method">${result.method}</span>
+    ${sourceChip}
     ${result.best_relevance ? `<span>Best match: <strong>${Math.round(result.best_relevance*100)}%</strong></span>` : ''}
   `;
 }
