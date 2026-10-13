@@ -90,7 +90,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (useDiversityToggle) {
     useDiversityToggle.addEventListener('change', (e) => {
-      State.set({ useDiversity: e.target.checked });
+      State.set({ diversify: e.target.checked });
       triggerActiveTabReload();
     });
   }
@@ -209,7 +209,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     const readerEmptyBanner = document.getElementById('reader-empty-banner');
     const btnEmptyGotoEditor = document.getElementById('btn-empty-goto-editor');
 
-    function checkReaderDatabaseState() {
+    async function checkReaderDatabaseState() {
+      try {
+        statusData = await Api.status();
+        State.set({ engineInfo: statusData });
+        if (engineNameEl) engineNameEl.textContent = statusData.engine || 'RecSys v1.0';
+        if (totalArticlesEl) {
+          totalArticlesEl.textContent = `${(statusData.total_articles || 0).toLocaleString()} stories`;
+        }
+      } catch (e) {
+        console.warn('Could not refresh engine status:', e);
+      }
+
       const isDbEmpty = !statusData || statusData.database_empty || statusData.total_articles === 0;
       if (readerEmptyBanner) {
         readerEmptyBanner.classList.toggle('hidden', !isDbEmpty);
@@ -220,9 +231,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (heroSection) heroSection.style.display = isDbEmpty ? 'none' : '';
       if (tabsNav) tabsNav.style.display = isDbEmpty ? 'none' : '';
       if (similarPanel) similarPanel.style.display = isDbEmpty ? 'none' : '';
+      return !isDbEmpty;
     }
 
-    function setAppRole(role) {
+    async function setAppRole(role) {
       const isEditor = role === 'editor';
       if (roleEditorBtn) roleEditorBtn.classList.toggle('active', isEditor);
       if (roleReaderBtn) roleReaderBtn.classList.toggle('active', !isEditor);
@@ -233,12 +245,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       if (isEditor) {
         Editor.refreshDbHealth();
       } else {
-        checkReaderDatabaseState();
-        Tabs.populateArticlePicker();
+        const hasArticles = await checkReaderDatabaseState();
+        if (hasArticles) {
+          try { await Hero.init(); } catch (e) { console.warn('Hero init skipped:', e.message); }
+          Tabs.populateArticlePicker();
+        }
       }
     }
 
     window.setAppRole = setAppRole;
+    window.refreshReaderAfterIngest = async () => {
+      const hasArticles = await checkReaderDatabaseState();
+      if (hasArticles) {
+        try { await Hero.init(); } catch (e) { console.warn('Hero init skipped:', e.message); }
+        Tabs.populateArticlePicker();
+      }
+    };
 
     if (roleEditorBtn) roleEditorBtn.addEventListener('click', () => setAppRole('editor'));
     if (roleReaderBtn) roleReaderBtn.addEventListener('click', () => setAppRole('reader'));

@@ -38,7 +38,14 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 # Set the environment variable NEWSREC_NEURAL=0 to skip them and use the light TF-IDF mode.
 USE_NEURAL_MODELS = os.getenv("NEWSREC_NEURAL", "1") == "1"
 EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
-RERANKER_MODEL = "BAAI/bge-reranker-base"
+RERANKER_MODEL = os.getenv("NEWSREC_RERANKER", "BAAI/bge-reranker-base")
+EMBED_MAX_SEQ_LEN = 256     # same for ingestion AND live search, so vectors are consistent
+RERANK_MAX_LEN = 160
+
+# --- Ingestion / precompute ---
+PRECOMPUTE_CANDIDATES = 20  # fused candidates sent to the reranker during ingestion (matches live N_CANDIDATES)
+PRECOMPUTE_COMMIT_EVERY = 5 # progress update + DB commit every N articles
+
 # bge models work better when a SHORT search query gets this prefix (articles do not need it)
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 SHORT_QUERY_WORDS = 12                        # fewer words than this = "short query"

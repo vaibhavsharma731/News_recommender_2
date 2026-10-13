@@ -6,6 +6,9 @@ Run:  python api/server.py
 import sys
 import os
 import math
+import json
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, List
 
@@ -14,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -24,11 +28,34 @@ from src.data_loader import load_articles
 from src.recommender import METHODS, Recommender
 from api.editor_routes import router as editor_router
 
-# ─── App setup ──────────────────────────────────────────────────────────────
+from db.connection import SessionLocal
+from db.repository import ArticleRepository
+from db.models import Article
+
+# ─── App lifecycle and setup ──────────────────────────────────────────────────
+_reload_lock = threading.Lock()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    try:
+        with SessionLocal() as db:
+            closed = ArticleRepository.fail_orphaned_jobs(db)
+            if closed:
+                print(f"[Startup] Marked {closed} interrupted ingestion job(s) as failed.")
+    except Exception as e:
+        print(f"[Startup] Could not clean up old jobs: {e}")
+
+    # Initial loading is heavy; don't block the event loop.
+    await run_in_threadpool(reload_engine_from_postgres)
+    yield
+
+
 app = FastAPI(
     title="News Recommender API",
     description="News recommendation engine built on Indian Express articles.",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -42,65 +69,65 @@ app.add_middleware(
 # Include Database and Editor Router
 app.include_router(editor_router)
 
-# ─── Globals & PostgreSQL Sync ───────────────────────────────────────────────
-from db.connection import SessionLocal
-from db.repository import ArticleRepository
-from db.models import Article
-
+# ─── Globals & PostgreSQL Sync ────────────────────────────────────────────────
 rec: Optional[Recommender] = None
 articles: pd.DataFrame = pd.DataFrame()
 
 
 def reload_engine_from_postgres():
-    """Reads articles directly from PostgreSQL and builds the search engine index."""
+    """Build the live search engine from PostgreSQL, reusing stored texts and vectors."""
     global rec, articles
-    try:
-        with SessionLocal() as db:
-            count = ArticleRepository.count_articles(db)
-            if count > 0:
-                print(f"[INFO] Loading {count} articles directly from PostgreSQL...")
-                arts = db.query(Article).order_by(Article.date.desc()).all()
-                rows = []
+    with _reload_lock:
+        try:
+            with SessionLocal() as db:
+                if ArticleRepository.count_articles(db) == 0:
+                    print("[INFO] PostgreSQL articles table is empty. Ready for Editor upload.")
+                    articles, rec = pd.DataFrame(), None
+                    return
+
+                arts = db.query(Article).order_by(Article.date.desc().nulls_last()).all()
+                rows, vecs, missing_vec = [], [], False
                 for a in arts:
+                    title, desc, body = str(a.title), str(a.description or ""), str(a.body or "")
+                    try:
+                        linked = json.loads(a.linked_ids) if a.linked_ids else []
+                    except Exception:
+                        linked = []
+
                     rows.append({
                         "id": str(a.id),
-                        "title": str(a.title),
-                        "description": str(a.description or ""),
+                        "title": title,
+                        "description": desc,
                         "section": str(a.section or ""),
                         "subsection": str(a.subsection or ""),
                         "date": a.date,
                         "url": str(a.url or ""),
                         "image": str(a.image or ""),
                         "is_live": bool(a.is_live),
-                        "body": str(a.body or ""),
+                        "body": body,
                         "pageViews": int(a.page_views or 0),
                         "uniqueUsers": int(a.unique_users or 0),
-                        "text_embed": str(a.text_embed or f"{a.title}. {a.description or ''}"),
+                        "linked_ids": linked,
+                        # Reuse the exact text representations saved by ingestion.
+                        "text_embed": a.text_embed or f"{title}. {desc}",
+                        "text_bm25": a.text_bm25 or f"{title}. {title}. {title}. {desc}. {body}",
+                        "text_rerank": a.text_rerank or f"{title}. {desc}.",
                     })
+                    if a.embedding is None:
+                        missing_vec = True
+                    else:
+                        vecs.append(a.embedding)
+
                 df_db = pd.DataFrame(rows)
-                df_db["text_bm25"] = [
-                    f"{t}. {t}. {t}. {d}. {b}"
-                    for t, d, b in zip(df_db.title, df_db.description, df_db.body)
-                ]
-                df_db["text_rerank"] = [
-                    f"{t}. {d}."
-                    for t, d in zip(df_db.title, df_db.description)
-                ]
-                rec = Recommender(df_db)
-                articles = rec.articles
-                print(f"[READY] Engine initialized directly from PostgreSQL: {len(articles)} articles!")
-            else:
-                print("[INFO] PostgreSQL articles table is currently empty. Ready for Editor upload.")
-                articles = pd.DataFrame()
-                rec = None
-    except Exception as e:
-        print(f"[DB Warning] Could not load from PostgreSQL: {e}")
-        articles = pd.DataFrame()
-        rec = None
+                df_db["date"] = pd.to_datetime(df_db["date"], utc=True, errors="coerce")
+                vectors = None if missing_vec else np.asarray(vecs, dtype=np.float32)
 
-
-# Initial load directly from PostgreSQL
-reload_engine_from_postgres()
+                new_rec = Recommender(df_db, vectors=vectors, use_disk_cache=False)
+                rec, articles = new_rec, new_rec.articles  # swap only after the new engine builds
+                print(f"[READY] Engine initialized from PostgreSQL: {len(articles)} articles.")
+        except Exception as e:
+            print(f"[DB Warning] Could not load from PostgreSQL: {e}")
+            articles, rec = pd.DataFrame(), None
 
 
 # ─── Pydantic request/response models ──────────────────────────────────────
@@ -275,56 +302,55 @@ def get_article(article_id: str):
 
 @app.post("/api/recommend")
 def recommend(body: RecommendRequest):
-    """
-    Recommendation endpoint:
-    1. If article_id: Checks PostgreSQL precomputed recommendations first (sub-5ms)!
-    2. If not found or query provided: Uses Recommender search.
-    """
     if not body.query and not body.article_id:
         raise HTTPException(
             status_code=400,
-            detail="Please provide either 'query' (for search) or 'article_id' (for similar articles)."
+            detail="Please provide either 'query' (for search) or 'article_id' (for similar articles).",
         )
 
-    # 1. Fast sub-5ms path: Check PostgreSQL precomputed recommendations
-    if body.article_id:
+    # Precomputed recommendations only represent the default similar-article request.
+    use_precomputed = bool(
+        body.article_id
+        and not body.query
+        and not body.section
+        and body.method == "hybrid+rerank"
+        and body.use_boosts
+        and body.diversify
+        and body.top_k <= config.TOP_K
+    )
+    if use_precomputed:
         try:
             with SessionLocal() as db:
                 precomputed = ArticleRepository.get_precomputed_recommendations(
                     db, str(body.article_id), limit=body.top_k
                 )
-                if precomputed:
-                    return {
-                        "method": "postgresql_precomputed_rerank",
-                        "engine": "PostgreSQL pgvector + Precomputed Cross-Encoder",
-                        "source": "postgresql",
-                        "low_confidence": False,
-                        "best_relevance": precomputed[0].get("score", 0.0),
-                        "notes": ["⚡ Served directly from PostgreSQL precomputed table (sub-5ms)"],
-                        "recommendations": [
-                            {
-                                "article": _article_dict(r),
-                                "score": r.get("score", 0.0),
-                                "reason": f"Rank #{r.get('rank', 1)} Precomputed via pgvector & Cross-Encoder"
-                            }
-                            for r in precomputed
-                        ]
-                    }
+            if precomputed:
+                return {
+                    "method": "postgresql_precomputed_rerank",
+                    "engine": "PostgreSQL pgvector + Precomputed Cross-Encoder",
+                    "source": "postgresql",
+                    "low_confidence": False,
+                    "best_relevance": precomputed[0].get("score", 0.0),
+                    "notes": ["⚡ Served directly from PostgreSQL precomputed table (sub-5ms)"],
+                    "recommendations": [{
+                        "article": _article_dict(r),
+                        "score": r.get("score", 0.0),
+                        "reason": r.get("reason") or f"Rank #{r.get('rank', 1)} precomputed",
+                    } for r in precomputed],
+                }
         except Exception as e:
             print(f"Error checking precomputed recommendations: {e}")
 
-    # 2. Fallback to search engine if initialized
     if rec is None:
         raise HTTPException(
             status_code=400,
-            detail="Database has no articles indexed yet. Please upload a dataset in the Editor Studio."
+            detail="Database has no articles indexed yet. Please upload a dataset in the Editor Studio.",
         )
 
     try:
-        aid = int(body.article_id) if (body.article_id and str(body.article_id).isdigit()) else body.article_id
         result = rec.recommend(
             query=body.query,
-            article_id=aid,
+            article_id=str(body.article_id) if body.article_id else None,
             top_k=body.top_k,
             method=body.method,
             use_boosts=body.use_boosts,
@@ -332,11 +358,12 @@ def recommend(body: RecommendRequest):
             section=body.section,
         )
         return _result_json(result, body.method)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Article not found in the search index.")
     except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 @app.get("/api/sections")

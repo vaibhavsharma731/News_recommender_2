@@ -204,18 +204,25 @@ class DenseIndex:
 
     name = "dense"
 
-    def __init__(self, texts, model_name=config.EMBEDDING_MODEL):
-        from sentence_transformers import SentenceTransformer  # imported here so light mode works without it
+    def __init__(self, texts, model_name=config.EMBEDDING_MODEL, vectors=None, use_disk_cache=True):
+        from src.model_registry import get_embedder
 
-        self.model = SentenceTransformer(model_name, device=DEVICE)
-        self.vectors = self._load_or_build(list(texts), model_name)
+        texts = list(texts)
+        self.model = get_embedder(model_name)
+        if vectors is not None:
+            stored = np.asarray(vectors, dtype=np.float32)
+            if stored.ndim == 2 and stored.shape[0] == len(texts):
+                self.vectors = stored
+                return
+            print("[DenseIndex] Stored embeddings do not match article count; rebuilding.")
+        self.vectors = self._load_or_build(texts, model_name, use_disk_cache=use_disk_cache)
 
-    def _load_or_build(self, texts, model_name) -> np.ndarray:
+    def _load_or_build(self, texts, model_name, use_disk_cache=True) -> np.ndarray:
         data_paths = getattr(config, "DATA_PATHS", [config.DATA_PATH])
         csv_mtime = sum(int(p.stat().st_mtime) for p in data_paths if p.exists())
         key = hashlib.md5(f"{model_name}|{csv_mtime}|{len(texts)}".encode()).hexdigest()[:12]
         path = config.CACHE_DIR / f"embeddings_{key}.npy"
-        if path.exists():                                   # instant start after the first run
+        if use_disk_cache and path.exists():
             return np.load(path)
         
         config.CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -248,8 +255,7 @@ class DenseIndex:
         if missing_texts:
             print(f"[DenseIndex] {len(texts) - len(missing_texts)}/{len(texts)} articles found in cache.")
             print(f"[DenseIndex] Encoding {len(missing_texts)} new articles (model={model_name})...")
-            # Limit max_seq_length to 256 for 2.3x faster CPU encoding while preserving full news leads
-            self.model.max_seq_length = 256
+            self.model.max_seq_length = getattr(config, "EMBED_MAX_SEQ_LEN", 256)
             new_vecs = self.model.encode(
                 missing_texts,
                 batch_size=32,
@@ -271,8 +277,9 @@ class DenseIndex:
             print(f"[DenseIndex] All {len(texts)} articles found in incremental cache.")
 
         vectors = np.array(vectors)
-        np.save(path, vectors)
-        print(f"[DenseIndex] Cache saved to {path}")
+        if use_disk_cache:
+            np.save(path, vectors)
+            print(f"[DenseIndex] Cache saved to {path}")
         return vectors
 
 

@@ -36,7 +36,7 @@ function sectionEmoji(section = '') {
 // ─── Toast ──────────────────────────────────────────────────────────────────
 function showToast(message, type = 'success', duration = 3500) {
   const container = document.getElementById('toast-container');
-  const icons = { success: '✅', info: 'ℹ️', warn: '⚠️' };
+  const icons = { success: '✅', info: 'ℹ️', warn: '⚠️', error: '❌' };
   const toast = document.createElement('div');
   toast.className = `toast toast-${type}`;
   toast.innerHTML = `

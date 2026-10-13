@@ -17,6 +17,7 @@ from .connection import SessionLocal
 from .models import Article, ArticleRecommendation, IngestionJob
 from .repository import ArticleRepository
 from src.retrieval import BM25Index, tokenize, reciprocal_rank_fusion
+from src.model_registry import get_embedder
 from src.data_loader import (
     normalise_text,
     remove_links,
@@ -31,17 +32,109 @@ from src.data_loader import (
 
 
 def _get_embedding_model():
-    """Lazily load the SentenceTransformer model."""
-    from sentence_transformers import SentenceTransformer
-    import torch
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return SentenceTransformer(config.EMBEDDING_MODEL, device=device)
+    """Return the shared embedding model from the model registry."""
+    return get_embedder()
 
 
 def _get_reranker_model():
-    """Lazily load the CrossEncoder model."""
+    """Return the shared cross-encoder reranker."""
     from src.reranker import Reranker
     return Reranker()
+
+
+def _fmt_eta(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m" if h else f"{m}m {s:02d}s"
+
+
+def _precompute_for_article(
+    idx, records, bm25, reranker, emb, max_views, max_date, n_retrieve, n_cand
+):
+    """Compute top recommendations for one article and return rows for persistence."""
+    row = records[idx]
+
+    # A. Keyword candidates
+    title_toks = tokenize(str(row["title"]))
+    body_toks = tokenize(f"{row['description']} {row['body']}")
+    top_terms = sorted(set(body_toks), key=lambda t: -bm25.idf.get(t, 0.0))[:15]
+    bm25_scores = bm25.scores(" ".join(title_toks + top_terms))
+    bm25_scores[idx] = -np.inf
+    bm25_rank = [
+        int(p)
+        for p in np.argsort(-bm25_scores)[:n_retrieve]
+        if bm25_scores[p] > 1e-9
+    ]
+
+    # B. Semantic candidates
+    dense_scores = emb @ emb[idx]
+    dense_scores[idx] = -np.inf
+    dense_rank = [int(p) for p in np.argsort(-dense_scores)[:n_retrieve]]
+
+    # C. Reciprocal-rank fusion
+    fused = reciprocal_rank_fusion([bm25_rank, dense_rank], k=config.RRF_K)
+    cands = sorted(fused, key=fused.get, reverse=True)[:n_cand]
+    if not cands:
+        return []
+
+    # D. Cross-encoder reranking
+    rerank_scores = np.asarray(
+        reranker.score(
+            row["text_rerank"],
+            [records[c]["text_rerank"] for c in cands],
+            batch_size=32,
+        ),
+        dtype=np.float32,
+    )
+
+    # E. Blend reranker, BM25, and dense relevance scores
+    cand_bm25 = np.where(np.isneginf(bm25_scores[cands]), 0.0, bm25_scores[cands])
+    bm25_max = cand_bm25.max() if cand_bm25.max() > 0 else 1.0
+    bm25_norm = cand_bm25 / bm25_max
+
+    cand_dense = dense_scores[cands]
+    dense_max = cand_dense.max() if cand_dense.max() > 0 else 1.0
+    dense_norm = np.clip(cand_dense / dense_max, 0.0, 1.0)
+    relevance = 0.55 * rerank_scores + 0.30 * bm25_norm + 0.15 * dense_norm
+
+    # F. News metadata boosts and G. MMR diversity
+    boosts = _calculate_boosts(row, [records[c] for c in cands], max_views, max_date)
+    order = _apply_mmr(
+        cands,
+        relevance * boosts,
+        emb[cands],
+        top_k=min(config.TOP_K, len(cands)),
+        lam=config.MMR_LAMBDA,
+    )
+
+    # H. Package ranked recommendations
+    recs = []
+    for rank, rel_pos in enumerate(order, start=1):
+        c = cands[rel_pos]
+        recs.append({
+            "recommended_article_id": str(records[c]["id"]),
+            "rank": rank,
+            "score": round(float(np.clip(relevance[rel_pos], 0.0, 1.0)), 4),
+            "method": "neural_hybrid_rerank",
+            "reason": _generate_reason(
+                row,
+                records[c],
+                title_toks,
+                bm25.docs[c],
+                bm25,
+                dense_sim=float(dense_norm[rel_pos]),
+                rerank_score=float(rerank_scores[rel_pos]),
+            ),
+        })
+    return recs
+
+def _as_bool(val) -> bool:
+    if isinstance(val, bool):
+        return val
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return False
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
 def clean_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
@@ -104,7 +197,7 @@ def clean_dataframe(raw_df: pd.DataFrame) -> pd.DataFrame:
         "date": pd.to_datetime(date_series, utc=True, errors="coerce"),
         "url": _col(["articleUrl", "url", "link"]).fillna(""),
         "image": _col(["articleFeaturedImage", "image", "imageUrl", "img"]).fillna(""),
-        "is_live": _col(["liveBlog", "is_live"], default=False).fillna(False).astype(bool),
+        "is_live": _col(["liveBlog", "is_live"], default=False).map(_as_bool),
         "body": bodies,
         "linked_ids": [json.dumps(l) for l in linked_ids],
         "page_views": pd.to_numeric(pv_series, errors="coerce").fillna(0).astype(int),
@@ -268,259 +361,151 @@ def run_ingestion_pipeline(
     csv_source: Union[str, Path, io.BytesIO],
     job_id: str,
     limit: Optional[int] = None,
-    recompute_all_recommendations: bool = True
+    recompute_all_recommendations: bool = True,
 ):
-    """
-    Complete PostgreSQL Ingestion & Precomputation Pipeline:
-    1. Parse CSV
-    2. Clean & Normalize Text
-    3. Save Articles & Metadata in PostgreSQL
-    4. Compute Neural Embeddings (bge-base-en-v1.5) & Save to pgvector
-    5. Build In-Corpus BM25 Keyword Index
-    6. Hybrid Retrieval (BM25 + pgvector) -> Reciprocal Rank Fusion (RRF Top 30)
-    7. Cross-Encoder Reranker on Top 30 Candidates
-    8. Multi-Factor News Boosts & MMR Diversity Filtering
-    9. Store Top 10 Precomputed Recommendations with Reasons in PostgreSQL
-    """
+    """CSV -> clean -> PostgreSQL -> embeddings -> BM25+dense -> RRF -> rerank -> boosts -> MMR -> top-10 saved."""
     db = SessionLocal()
+    t_job = time.time()
     try:
-        ArticleRepository.update_job(
-            db, job_id, status="processing", message="STAGE:PARSE|Parsing and validating CSV records..."
-        )
+        upd = lambda **kw: ArticleRepository.update_job(db, job_id, **kw)
 
-        # 1. Read CSV
-        if isinstance(csv_source, (str, Path)):
-            raw_df = pd.read_csv(csv_source)
-        else:
-            raw_df = pd.read_csv(csv_source)
-
+        # 1. Parse CSV
+        upd(status="processing", message="STAGE:PARSE|Parsing and validating CSV records...")
+        raw_df = pd.read_csv(csv_source)
         if limit and limit > 0:
             raw_df = raw_df.head(limit)
-
-        total_rows = len(raw_df)
-        ArticleRepository.update_job(
-            db, job_id, total_articles=total_rows, message=f"STAGE:CLEAN|Cleaning and normalizing {total_rows} articles..."
+        upd(
+            total_articles=len(raw_df),
+            message=f"STAGE:CLEAN|Cleaning and normalizing {len(raw_df)} articles...",
         )
 
-        # 2. Clean & Normalize
+        # 2. Clean records
         df = clean_dataframe(raw_df)
-        n_articles = len(df)
-        ArticleRepository.update_job(
-            db, job_id, total_articles=n_articles, message=f"STAGE:STORAGE|Saving {n_articles} cleaned articles to PostgreSQL..."
-        )
+        n = len(df)
+        if n == 0:
+            raise ValueError("CSV contained no usable articles.")
+        upd(total_articles=n, message=f"STAGE:STORAGE|Saving {n} cleaned articles to PostgreSQL...")
 
-        # 3. Upsert articles into PostgreSQL
-        for _, row in df.iterrows():
-            art_dict = {
-                "id": str(row["id"]),
-                "title": str(row["title"]),
-                "description": str(row["description"]),
-                "body": str(row["body"]),
-                "section": str(row["section"]),
-                "subsection": str(row["subsection"]),
-                "date": row["date"] if pd.notna(row["date"]) else None,
-                "url": str(row["url"]),
-                "image": str(row["image"]),
-                "is_live": bool(row["is_live"]),
-                "page_views": int(row["page_views"]),
-                "unique_users": int(row["unique_users"]),
-                "linked_ids": str(row["linked_ids"]),
-                "text_embed": str(row["text_embed"]),
-                "text_bm25": str(row["text_bm25"]),
-                "text_rerank": str(row["text_rerank"]),
-            }
-            ArticleRepository.upsert_article(db, art_dict)
-        db.commit()
+        # 3. Persist articles with batched INSERT ... ON CONFLICT
+        records = df.to_dict("records")
+        ids = [str(r["id"]) for r in records]
+        ArticleRepository.bulk_upsert_articles_fast(db, [{
+            "id": str(r["id"]),
+            "title": str(r["title"]),
+            "description": str(r["description"]),
+            "body": str(r["body"]),
+            "section": str(r["section"]),
+            "subsection": str(r["subsection"]),
+            "date": r["date"].to_pydatetime() if pd.notna(r["date"]) else None,
+            "url": str(r["url"]),
+            "image": str(r["image"]),
+            "is_live": bool(r["is_live"]),
+            "page_views": int(r["page_views"]),
+            "unique_users": int(r["unique_users"]),
+            "linked_ids": str(r["linked_ids"]),
+            "text_embed": str(r["text_embed"]),
+            "text_bm25": str(r["text_bm25"]),
+            "text_rerank": str(r["text_rerank"]),
+        } for r in records])
 
-        # 4. Neural Embeddings Generation
-        ArticleRepository.update_job(
-            db, job_id, message="STAGE:EMBEDDING|Loading neural embedding model (bge-base-en-v1.5)..."
-        )
-        embed_model = _get_embedding_model()
+        # 4. Build and persist embeddings
+        upd(message="STAGE:EMBEDDING|Loading embedding model (first run downloads ~440 MB)...")
+        embedder = _get_embedding_model()
 
-        texts_to_embed = df["text_embed"].tolist()
-        batch_size = 32
-        all_embeddings = []
-
-        ArticleRepository.update_job(
-            db, job_id, message=f"STAGE:EMBEDDING|Computing 768d dense vectors for {n_articles} articles..."
-        )
-
-        for i in range(0, n_articles, batch_size):
-            batch_texts = texts_to_embed[i : i + batch_size]
-            batch_vecs = embed_model.encode(batch_texts, normalize_embeddings=True, show_progress_bar=False)
-            all_embeddings.extend(batch_vecs)
-
-            current_count = min(i + batch_size, n_articles)
-            ArticleRepository.update_job(
-                db,
-                job_id,
-                processed_articles=int(current_count * 0.40), # 40% allocated to embeddings
-                message=f"STAGE:EMBEDDING|Embedded {current_count}/{n_articles} articles into pgvector column..."
+        texts = df["text_embed"].tolist()
+        chunks, chunk_size, t0 = [], 128, time.time()
+        for i in range(0, n, chunk_size):
+            chunks.append(embedder.encode(
+                texts[i:i + chunk_size],
+                batch_size=32,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            ))
+            done = min(i + chunk_size, n)
+            eta = (time.time() - t0) / done * (n - done)
+            upd(
+                processed_articles=int(0.40 * done),
+                message=f"STAGE:EMBEDDING|Embedded {done}/{n} articles (ETA {_fmt_eta(eta)})...",
             )
+        emb = np.vstack(chunks).astype(np.float32)
+        ArticleRepository.bulk_set_embeddings(db, ids, emb)
 
-        all_embeddings_np = np.array(all_embeddings, dtype=float)
-
-        # Save embeddings in PostgreSQL
-        for idx, row in df.iterrows():
-            art = ArticleRepository.get_article(db, str(row["id"]))
-            if art:
-                art.embedding = all_embeddings_np[idx].tolist()
-        db.commit()
-
-        # 5. Hybrid Index Construction: BM25 Keyword Engine
-        ArticleRepository.update_job(
-            db, job_id, message="STAGE:INDEX|Building in-memory BM25 index with Indian entity fuzzy vocabulary..."
-        )
+        # 5. Build BM25 index
+        upd(message="STAGE:INDEX|Building in-memory BM25 index...")
         bm25 = BM25Index(df["text_bm25"])
 
-        # 6. Precompute Recommendations (BM25 + pgvector -> RRF Top 30 -> Cross-Encoder -> Boosts -> MMR)
-        ArticleRepository.update_job(
-            db, job_id, message="STAGE:RERANK|Loading cross-encoder reranker model (bge-reranker-base)..."
-        )
+        # 6. Rerank candidates and save recommendations in batches
+        upd(message="STAGE:RERANK|Loading cross-encoder (first run downloads ~1 GB, can take minutes)...")
         reranker = _get_reranker_model()
 
-        text_rerank_map = dict(zip(df["id"].astype(str), df["text_rerank"]))
-        max_views = int(df["page_views"].max()) if len(df) else 1
-        max_date = df["date"].max() if "date" in df.columns else None
+        max_views = int(df["page_views"].max()) if n else 1
+        max_date = df["date"].max()
+        n_retrieve = min(config.N_RETRIEVE, max(n - 1, 0))
+        n_cand = min(config.N_CANDIDATES, max(n - 1, 0))
 
-        ArticleRepository.update_job(
-            db, job_id, message=f"STAGE:RERANK|Precomputing hybrid recommendations (Top 30 RRF fusion -> Rerank -> MMR)..."
+        already = (
+            set()
+            if recompute_all_recommendations
+            else ArticleRepository.get_ids_with_recommendations(db)
         )
+        todo = [i for i in range(n) if n > 1 and ids[i] not in already]
+        failed, t0 = 0, time.time()
 
-        n_retrieve = min(config.N_RETRIEVE, n_articles - 1) if n_articles > 1 else 1
-        n_candidates = min(config.N_CANDIDATES, n_articles - 1) if n_articles > 1 else 1
-
-        for idx, row in df.iterrows():
-            art_id = str(row["id"])
-            source_row = row.to_dict()
-            source_rerank_text = text_rerank_map.get(art_id, str(row["title"]))
-
-            if n_articles <= 1:
-                continue
-
-            # Step 6A: BM25 focused query
-            title_toks = tokenize(str(row["title"]))
-            body_toks = tokenize(f"{row['description']} {row['body']}")
-            top_body_terms = sorted(set(body_toks), key=lambda t: -bm25.idf.get(t, 0.0))[:15]
-            focused_query = " ".join(title_toks + top_body_terms)
-            bm25_scores = bm25.scores(focused_query)
-            bm25_scores[idx] = -np.inf  # Exclude self
-
-            bm25_rank = [int(p) for p in np.argsort(-bm25_scores)[:n_retrieve] if bm25_scores[p] > 1e-9]
-
-            # Step 6B: Dense semantic vector scores (cosine similarity)
-            dense_scores = all_embeddings_np @ all_embeddings_np[idx]
-            dense_scores[idx] = -np.inf  # Exclude self
-            dense_rank = [int(p) for p in np.argsort(-dense_scores)[:n_retrieve]]
-
-            # Step 6C: Reciprocal Rank Fusion (RRF) -> Top 30 candidates
-            fused = reciprocal_rank_fusion([bm25_rank, dense_rank], k=config.RRF_K)
-            candidate_indices = sorted(fused, key=fused.get, reverse=True)[:n_candidates]
-
-            if not candidate_indices:
-                continue
-
-            # Step 6D: Cross-Encoder Reranking on Top 30 candidates
-            cand_rerank_texts = [
-                text_rerank_map.get(str(df.iloc[c]["id"]), str(df.iloc[c]["title"]))
-                for c in candidate_indices
-            ]
-            rerank_scores = reranker.score(source_rerank_text, cand_rerank_texts, batch_size=32)
-
-            # Step 6E: Score Blending (Cross-Encoder 55% + BM25 30% + Dense 15%)
-            cand_bm25 = bm25_scores[candidate_indices]
-            cand_bm25 = np.where(np.isneginf(cand_bm25), 0.0, cand_bm25)
-            bm25_max = cand_bm25.max() if len(cand_bm25) and cand_bm25.max() > 0 else 1.0
-            bm25_norm = cand_bm25 / bm25_max
-
-            cand_dense = dense_scores[candidate_indices]
-            dense_max = cand_dense.max() if len(cand_dense) and cand_dense.max() > 0 else 1.0
-            dense_norm = np.clip(cand_dense / dense_max, 0.0, 1.0)
-
-            relevance = 0.55 * rerank_scores + 0.30 * bm25_norm + 0.15 * dense_norm
-
-            # Step 6F: Editorial & News Multiplier Boosts
-            candidate_rows = [df.iloc[c].to_dict() for c in candidate_indices]
-            boost_mults = _calculate_boosts(source_row, candidate_rows, max_views, max_date)
-            boosted_scores = relevance * boost_mults
-
-            # Step 6G: MMR Diversity Selection (Top 10)
-            cand_vecs = all_embeddings_np[candidate_indices]
-            final_order = _apply_mmr(
-                candidate_indices,
-                boosted_scores,
-                cand_vecs,
-                top_k=min(config.TOP_K, len(candidate_indices)),
-                lam=config.MMR_LAMBDA
-            )
-
-            # Step 6H: Build Recommendation Objects with Reasons
-            top_10_recommendations = []
-            for rank_pos, rel_pos in enumerate(final_order, start=1):
-                actual_df_idx = candidate_indices[rel_pos]
-                cand_dict = df.iloc[actual_df_idx].to_dict()
-                c_dense_sim = float(dense_norm[rel_pos]) if len(dense_norm) > rel_pos else 0.0
-                c_rerank_score = float(rerank_scores[rel_pos]) if len(rerank_scores) > rel_pos else 0.0
-
-                reason = _generate_reason(
-                    source_row,
-                    cand_dict,
-                    title_toks,
-                    cand_bm25_doc,
-                    bm25,
-                    dense_sim=c_dense_sim,
-                    rerank_score=c_rerank_score
+        for done, idx in enumerate(todo, start=1):
+            try:
+                recs = _precompute_for_article(
+                    idx, records, bm25, reranker, emb,
+                    max_views, max_date, n_retrieve, n_cand,
                 )
+            except Exception as art_err:  # one bad article must not terminate the entire job
+                failed += 1
+                recs = []
+                print(f"[Pipeline] Skipped article {ids[idx]}: {art_err}")
 
-                top_10_recommendations.append({
-                    "recommended_article_id": str(cand_dict["id"]),
-                    "rank": rank_pos,
-                    "score": round(float(np.clip(relevance[rel_pos], 0.0, 1.0)), 4),
-                    "method": "neural_hybrid_rerank",
-                    "reason": reason
-                })
+            if recs:
+                ArticleRepository.save_recommendations(db, ids[idx], recs, commit=False)
 
-            # Save to PostgreSQL article_recommendations table
-            ArticleRepository.save_recommendations(db, art_id, top_10_recommendations)
-
-            # Frequent progress update: every 2 articles or on final article
-            if (idx + 1) % 2 == 0 or (idx + 1) == n_articles:
-                processed_recs = int(n_articles * 0.40) + int(((idx + 1) / n_articles) * (n_articles * 0.60))
-                pct = int(((idx + 1) / n_articles) * 100)
-                ArticleRepository.update_job(
-                    db,
-                    job_id,
-                    processed_articles=processed_recs,
-                    message=f"STAGE:RERANK|Precomputing recommendations: {idx + 1}/{n_articles} articles ({pct}% complete)..."
+            if done % config.PRECOMPUTE_COMMIT_EVERY == 0 or done == len(todo):
+                per = (time.time() - t0) / done
+                eta = per * (len(todo) - done)
+                # update_job commits and therefore commits pending recommendation writes too.
+                upd(
+                    processed_articles=int(0.40 * n + 0.60 * n * done / len(todo)),
+                    message=(
+                        f"STAGE:RERANK|Precomputed {done}/{len(todo)} "
+                        f"({per:.1f}s/article, ETA {_fmt_eta(eta)})"
+                    ),
                 )
+        db.commit()
 
-        # Notify active server engine to reload memory index if available
+        # 7. Refresh live engine directly in this process (no HTTP request needed).
+        upd(message="STAGE:INDEX|Refreshing live search engine...")
         try:
-            import requests
-            requests.post("http://localhost:5000/api/db/reload", timeout=1)
-        except Exception:
-            pass
+            from api.server import reload_engine_from_postgres
+            reload_engine_from_postgres()
+        except Exception as reload_err:
+            print(f"[Pipeline] Engine reload skipped: {reload_err}")
 
-        # Completed!
-        ArticleRepository.update_job(
-            db,
-            job_id,
+        note = f" ({failed} skipped)" if failed else ""
+        upd(
             status="completed",
-            processed_articles=n_articles,
-            message=f"STAGE:COMPLETE|Successfully processed {n_articles} articles and generated top-10 precomputed recommendations!"
+            processed_articles=n,
+            message=f"STAGE:COMPLETE|Processed {n} articles{note} in {_fmt_eta(time.time() - t_job)}.",
         )
 
     except Exception as exc:
         import traceback
-        err_msg = traceback.format_exc()
-        print(f"[Pipeline Error] {err_msg}")
-        ArticleRepository.update_job(
-            db,
-            job_id,
-            status="failed",
-            message="Processing encountered an error",
-            error=str(exc)
-        )
+        print(f"[Pipeline Error] {traceback.format_exc()}")
+        try:
+            db.rollback()  # ensure the failure status can be written after a DB error
+            ArticleRepository.update_job(
+                db,
+                job_id,
+                status="failed",
+                message="Processing encountered an error",
+                error=str(exc)[:2000],
+            )
+        except Exception as inner:
+            print(f"[Pipeline] Could not record failure: {inner}")
     finally:
         db.close()

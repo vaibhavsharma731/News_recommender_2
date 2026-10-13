@@ -41,7 +41,7 @@ class Result:
 
 
 class Recommender:
-    def __init__(self, articles: pd.DataFrame, use_neural: bool = config.USE_NEURAL_MODELS):
+    def __init__(self, articles: pd.DataFrame, use_neural: bool = config.USE_NEURAL_MODELS, vectors=None, use_disk_cache=True):
         self.articles = articles.reset_index(drop=True)
         self.id_to_pos = {}
         for i, aid in enumerate(self.articles["id"]):
@@ -51,14 +51,14 @@ class Recommender:
         self._max_page_views = int(self.articles["pageViews"].max()) if "pageViews" in self.articles.columns else 1
 
         self.bm25 = BM25Index(self.articles["text_bm25"])
-        self.semantic = self._build_semantic(use_neural)
+        self.semantic = self._build_semantic(use_neural, vectors, use_disk_cache)
         self.reranker = self._build_reranker(use_neural)
 
     # ---------------------------------------------------------------- setup
-    def _build_semantic(self, use_neural):
+    def _build_semantic(self, use_neural, vectors=None, use_disk_cache=True):
         if use_neural:
             try:
-                return DenseIndex(self.articles["text_embed"])
+                return DenseIndex(self.articles["text_embed"], vectors=vectors, use_disk_cache=use_disk_cache)
             except Exception as error:
                 self.notes.append(f"Neural embeddings unavailable ({type(error).__name__}); using TF-IDF instead.")
         return TfidfIndex(self.articles["text_embed"])

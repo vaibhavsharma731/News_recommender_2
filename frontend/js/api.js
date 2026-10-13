@@ -15,7 +15,12 @@ const Api = (() => {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
-      const msg = (typeof err.detail === 'string' ? err.detail : null) || err.error || err.message || `HTTP ${res.status}`;
+      let msg = err.error || err.message || `HTTP ${res.status}`;
+      if (typeof err.detail === 'string') {
+        msg = err.detail;
+      } else if (Array.isArray(err.detail)) {
+        msg = err.detail.map(d => d.msg || JSON.stringify(d)).join('; ');
+      }
       throw new Error(msg);
     }
     return res.json();

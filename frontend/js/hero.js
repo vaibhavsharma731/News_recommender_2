@@ -5,6 +5,7 @@ const Hero = (() => {
   let slides   = [];
   let current  = 0;
   let timer    = null;
+  let navBound = false;
 
   const carousel = () => document.getElementById('hero-carousel');
   const dotsEl   = () => document.getElementById('hero-dots');
@@ -39,12 +40,13 @@ const Hero = (() => {
         </div>
       </div>`;
 
-    // Clicking "Read Full Story" also adds to history
-    div.querySelector('.hero-read-btn').addEventListener('click', () => {
-      State.addToHistory(article.id);
-      State.saveHistory();
-      refreshHistoryUI();
-    });
+    const readBtn = div.querySelector('.hero-read-btn');
+    if (readBtn && typeof State.addToHistory === 'function') {
+      readBtn.addEventListener('click', () => {
+        State.addToHistory(article.id);
+        if (typeof State.saveHistory === 'function') State.saveHistory();
+      });
+    }
     return div;
   }
 
@@ -88,8 +90,13 @@ const Hero = (() => {
         d.appendChild(buildDot(i));
       });
 
-      document.getElementById('hero-prev').addEventListener('click', () => { prev(); clearInterval(timer); startAutoPlay(); });
-      document.getElementById('hero-next').addEventListener('click', () => { next(); clearInterval(timer); startAutoPlay(); });
+      if (!navBound) {
+        const prevBtn = document.getElementById('hero-prev');
+        const nextBtn = document.getElementById('hero-next');
+        if (prevBtn) prevBtn.addEventListener('click', () => { prev(); clearInterval(timer); startAutoPlay(); });
+        if (nextBtn) nextBtn.addEventListener('click', () => { next(); clearInterval(timer); startAutoPlay(); });
+        navBound = true;
+      }
 
       startAutoPlay();
     } catch (err) {

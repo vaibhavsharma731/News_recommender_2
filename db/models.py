@@ -60,13 +60,23 @@ class Article(Base):
     )
 
     def to_dict(self, include_embedding: bool = False) -> dict:
+        description = self.description or ""
+        body = self.body or ""
+        if self.date:
+            try:
+                date_str = self.date.strftime("%d %b %Y")
+            except Exception:
+                date_str = str(self.date)
+        else:
+            date_str = ""
         data = {
             "id": self.id,
             "title": self.title,
-            "description": self.description or "",
+            "description": description,
+            "snippet": (description or body)[:200],
             "section": self.section or "",
             "subsection": self.subsection or "",
-            "date": self.date.isoformat() if self.date else "",
+            "date": date_str,
             "url": self.url or "",
             "image": self.image or "",
             "is_live": bool(self.is_live),

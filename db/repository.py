@@ -6,6 +6,7 @@ from typing import List, Optional, Dict, Any
 import json
 from sqlalchemy.orm import Session
 from sqlalchemy import desc, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from pgvector.sqlalchemy import Vector
 
 from .models import Article, ArticleRecommendation, IngestionJob
@@ -48,7 +49,7 @@ class ArticleRepository:
                     Article.description.ilike(search_pattern)
                 )
             )
-        return query.order_by(desc(Article.date)).offset(offset).limit(limit).all()
+        return query.order_by(desc(Article.date).nulls_last()).offset(offset).limit(limit).all()
 
     @staticmethod
     def get_sections(db: Session) -> List[str]:
@@ -72,6 +73,28 @@ class ArticleRepository:
     def bulk_upsert_articles(db: Session, articles_data: List[dict]):
         for item in articles_data:
             ArticleRepository.upsert_article(db, item)
+        db.commit()
+
+    @staticmethod
+    def bulk_upsert_articles_fast(db: Session, rows: List[dict], chunk: int = 500):
+        """One INSERT ... ON CONFLICT per chunk instead of a SELECT per article."""
+        if not rows:
+            return
+        update_cols = [column for column in rows[0].keys() if column != "id"]
+        for i in range(0, len(rows), chunk):
+            stmt = pg_insert(Article).values(rows[i:i + chunk])
+            set_ = {column: stmt.excluded[column] for column in update_cols}
+            set_["updated_at"] = func.now()
+            db.execute(stmt.on_conflict_do_update(index_elements=[Article.id], set_=set_))
+        db.commit()
+
+    @staticmethod
+    def bulk_set_embeddings(db: Session, ids: List[str], vectors, chunk: int = 500):
+        for i in range(0, len(ids), chunk):
+            db.bulk_update_mappings(Article, [
+                {"id": article_id, "embedding": vector.tolist()}
+                for article_id, vector in zip(ids[i:i + chunk], vectors[i:i + chunk])
+            ])
         db.commit()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -118,18 +141,18 @@ class ArticleRepository:
     def save_recommendations(
         db: Session,
         article_id: str,
-        recommendations: List[Dict[str, Any]]
+        recommendations: List[Dict[str, Any]],
+        commit: bool = True,
     ):
         """
         Atomically saves precomputed recommendations for an article.
         recommendations: list of dicts with keys: 'recommended_article_id', 'rank', 'score', 'method', 'reason'
         """
-        # Remove existing recommendations for this article
         db.query(ArticleRecommendation).filter(
             ArticleRecommendation.article_id == article_id
-        ).delete()
+        ).delete(synchronize_session=False)
+        db.flush()
 
-        # Add new recommendations
         for item in recommendations:
             rec = ArticleRecommendation(
                 article_id=article_id,
@@ -140,7 +163,8 @@ class ArticleRepository:
                 reason=item.get("reason", "High topic and semantic relevance"),
             )
             db.add(rec)
-        db.commit()
+        if commit:
+            db.commit()
 
     @staticmethod
     def get_precomputed_recommendations(
@@ -242,3 +266,32 @@ class ArticleRepository:
     @staticmethod
     def list_recent_jobs(db: Session, limit: int = 10) -> List[IngestionJob]:
         return db.query(IngestionJob).order_by(desc(IngestionJob.created_at)).limit(limit).all()
+
+    @staticmethod
+    def get_active_job(db: Session) -> Optional[IngestionJob]:
+        return (
+            db.query(IngestionJob)
+            .filter(IngestionJob.status.in_(["processing", "pending"]))
+            .order_by(desc(IngestionJob.created_at))
+            .first()
+        )
+
+    @staticmethod
+    def fail_orphaned_jobs(db: Session) -> int:
+        """Mark jobs left in pending/processing after a server restart as failed."""
+        jobs = (
+            db.query(IngestionJob)
+            .filter(IngestionJob.status.in_(["processing", "pending"]))
+            .all()
+        )
+        for job in jobs:
+            job.status = "failed"
+            job.error = "Interrupted because the API server restarted."
+            job.message = "Processing encountered an error"
+        db.commit()
+        return len(jobs)
+
+    @staticmethod
+    def get_ids_with_recommendations(db: Session) -> set:
+        rows = db.query(ArticleRecommendation.article_id).distinct().all()
+        return {row[0] for row in rows}

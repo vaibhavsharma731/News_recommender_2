@@ -211,6 +211,13 @@ const Editor = (() => {
   }
 
   // ─── Pipeline Monitor & Animations ───────────────────────────────────────
+  function stopPolling() {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
   function startPipelineMonitor(jobId) {
     if (dom.visualizer) dom.visualizer.classList.remove('hidden');
     if (dom.completion) dom.completion.classList.add('hidden');
@@ -244,7 +251,7 @@ const Editor = (() => {
         updatePipelineNodes(stage);
 
         if (job.status === 'completed') {
-          clearInterval(pollInterval);
+          stopPolling();
           setAllNodesDone();
           appendLog('🎉 [Success] All articles and top 10 recommendations stored in PostgreSQL.');
 
@@ -258,13 +265,16 @@ const Editor = (() => {
           await refreshDbHealth();
           loadInspectorArticles();
           loadRecentJobs();
+          if (typeof window.refreshReaderAfterIngest === 'function') {
+            await window.refreshReaderAfterIngest();
+          }
           if (dom.uploadBtn && selectedFile) dom.uploadBtn.disabled = false;
           if (dom.demoBtn) {
             dom.demoBtn.disabled = false;
             dom.demoBtn.textContent = '⚡ Ingest Sample Dataset (100 Articles Demo)';
           }
         } else if (job.status === 'failed') {
-          clearInterval(pollInterval);
+          stopPolling();
           appendLog(`❌ [Failed] ${job.error || 'Pipeline encountered an error.'}`);
           showToast(`Pipeline failed: ${job.error}`, 'error');
           if (dom.uploadBtn && selectedFile) dom.uploadBtn.disabled = false;
@@ -296,6 +306,7 @@ const Editor = (() => {
       'CLEAN':     { curr: 'node-clean',   done: ['node-parse'] },
       'STORAGE':   { curr: 'node-storage', done: ['node-parse', 'node-clean'] },
       'EMBEDDING': { curr: 'node-embed',   done: ['node-parse', 'node-clean', 'node-storage'] },
+      'INDEX':     { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
       'PGVECTOR':  { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
       'RERANK':    { curr: 'node-rerank',  done: ['node-parse', 'node-clean', 'node-storage', 'node-embed'] },
       'COMPLETE':  { curr: null,           done: ['node-parse', 'node-clean', 'node-storage', 'node-embed', 'node-rerank'] },
@@ -425,6 +436,14 @@ const Editor = (() => {
     try {
       const data = await Api.recentJobs();
       const jobs = data.jobs || [];
+
+      const running = jobs.find(j => j.status === 'processing' || j.status === 'pending');
+      if (running && !pollInterval) {
+        activeJobId = running.id;
+        if (dom.demoBtn) dom.demoBtn.disabled = true;
+        if (dom.uploadBtn) dom.uploadBtn.disabled = true;
+        startPipelineMonitor(running.id);
+      }
 
       if (jobs.length === 0) {
         dom.recentJobsBody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:14px;">No jobs recorded yet.</td></tr>';

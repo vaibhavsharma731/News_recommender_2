@@ -45,6 +45,7 @@ def evaluate_linked_labels(rec, method):
     valid = df[df["linked_ids"].map(len) > 0]
     if valid.empty:
         return 0.0, 0.0
+    valid = valid.sample(min(len(valid), 150), random_state=0)
     
     p5, ndcg = [], []
     for _, row in valid.iterrows():

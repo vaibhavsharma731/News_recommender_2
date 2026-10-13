@@ -97,6 +97,7 @@ def check_db_health() -> Dict[str, Any]:
                     conn.commit()
                     health["pgvector_ready"] = True
             except Exception as ext_err:
+                conn.rollback()
                 health["pgvector_ready"] = False
                 health["vector_warning"] = (
                     f"pgvector extension is not installed in PostgreSQL: {str(ext_err)}"

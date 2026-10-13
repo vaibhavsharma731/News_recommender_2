@@ -8,9 +8,10 @@ Editor and PostgreSQL API routes:
 import os
 import uuid
 import shutil
+import threading
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from db.connection import get_db, check_db_health, init_db
@@ -54,7 +55,6 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB security limit
 
 @router.post("/upload-csv")
 async def upload_csv(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
@@ -63,7 +63,7 @@ async def upload_csv(
     launches background pipeline (Cleaning -> Postgres -> Embeddings -> pgvector Top 50 -> Reranker Top 10).
     """
     # Guard against concurrent background jobs competing for CPU
-    active_job = db.query(IngestionJob).filter(IngestionJob.status == "processing").first()
+    active_job = ArticleRepository.get_active_job(db)
     if active_job:
         raise HTTPException(
             status_code=409,
@@ -89,7 +89,11 @@ async def upload_csv(
             buffer.write(chunk)
 
     ArticleRepository.create_job(db, job_id=job_id, filename=safe_filename)
-    background_tasks.add_task(run_ingestion_pipeline, saved_path, job_id)
+    threading.Thread(
+        target=run_ingestion_pipeline,
+        args=(saved_path, job_id),
+        daemon=True,
+    ).start()
 
     return {
         "job_id": job_id,
@@ -102,14 +106,13 @@ async def upload_csv(
 
 @router.post("/ingest-default")
 def ingest_default_dataset(
-    background_tasks: BackgroundTasks,
     limit: Optional[int] = Query(None, description="Max rows to process (e.g. 100 for fast demo)"),
     db: Session = Depends(get_db)
 ):
     """
     One-click ingestion of the existing sample dataset into PostgreSQL.
     """
-    active_job = db.query(IngestionJob).filter(IngestionJob.status == "processing").first()
+    active_job = ArticleRepository.get_active_job(db)
     if active_job:
         raise HTTPException(
             status_code=409,
@@ -122,8 +125,12 @@ def ingest_default_dataset(
 
     job_id = f"job_demo_{uuid.uuid4().hex[:6]}"
     ArticleRepository.create_job(db, job_id=job_id, filename="articles_clean_train_80.csv")
-
-    background_tasks.add_task(run_ingestion_pipeline, default_csv, job_id, limit=limit)
+    threading.Thread(
+        target=run_ingestion_pipeline,
+        args=(default_csv, job_id),
+        kwargs={"limit": limit},
+        daemon=True,
+    ).start()
 
     return {
         "job_id": job_id,
