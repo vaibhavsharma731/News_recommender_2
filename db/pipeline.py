@@ -649,6 +649,11 @@ def run_ingestion_pipeline(
             target_positions = [id_to_pos[i] for i in ids if i in id_to_pos]  # just this upload
 
         candidate_map: Dict[int, List[int]] = {}
+        # Distinct EXISTING articles that any new article is close to. This grows as
+        # the precompute loop runs, which lets us estimate the reverse-update
+        # workload (and therefore an honest, whole-job time-left) BEFORE that pass.
+        reverse_seen: set = set()
+        track_reverse = (not recompute_all_recommendations) and config.INCREMENTAL_RECOMMENDATIONS
         failed, t0 = 0, time.time()
         total_targets = max(len(target_positions), 1)
 
@@ -668,17 +673,37 @@ def run_ingestion_pipeline(
                     db, str(full_records[pos]["id"]), recs, commit=False
                 )
             candidate_map[pos] = cands
+            if track_reverse:
+                for cpos in cands:
+                    if str(full_records[cpos]["id"]) not in new_id_set:
+                        reverse_seen.add(cpos)
 
             if done % config.PRECOMPUTE_COMMIT_EVERY == 0 or done == total_targets:
                 per = (time.time() - t0) / done
-                eta = per * (total_targets - done)
+                eta_pre = per * (total_targets - done)
+
+                # Estimate the upcoming reverse pass so the displayed ETA covers the
+                # WHOLE job, not just this precompute loop. Extrapolate the distinct
+                # old articles seen so far across the full upload.
+                est_rev = len(reverse_seen)
+                if track_reverse:
+                    if done < total_targets:
+                        est_rev = int(round(est_rev * total_targets / done))
+                    eta = eta_pre + per * est_rev
+                    eta_txt = f"ETA {_fmt_eta(eta)}"
+                    if est_rev > 0:
+                        eta_txt += f" (incl. ~{_fmt_eta(per * est_rev)} reverse)"
+                else:
+                    eta = eta_pre
+                    eta_txt = f"ETA {_fmt_eta(eta)}"
+
                 # update_job commits and therefore commits pending recommendation writes too.
                 # Reserve the last 5% of the bar for the reverse-update pass (step 6b).
                 upd(
                     processed_articles=int(0.40 * n + 0.55 * n * done / total_targets),
                     message=(
                         f"STAGE:RERANK|Precomputed {done}/{total_targets} "
-                        f"({per:.1f}s/article, ETA {_fmt_eta(eta)})"
+                        f"({per:.1f}s/article, {eta_txt})"
                     ),
                 )
         db.commit()
@@ -686,15 +711,28 @@ def run_ingestion_pipeline(
         # 6b. Reverse pass: let the new articles flow into the lists of the EXISTING
         #     articles they are close to (skipped during a full rebuild).
         refreshed_infos: List[Dict[str, Any]] = []
-        if not recompute_all_recommendations and config.INCREMENTAL_RECOMMENDATIONS:
-            upd(message="STAGE:REVERSE|Finding existing articles affected by this upload...")
+        if track_reverse:
+            rev_total = len(reverse_seen)
+            upd(message=(
+                f"STAGE:REVERSE|Re-scoring {rev_total} existing article(s) "
+                f"affected by this upload..."
+            ))
+
+            t_rev = time.time()
 
             def _rev_progress(done, total, title):
                 snippet = (title[:48] + "…") if len(title) > 48 else title
-                upd(message=(
-                    f"STAGE:REVERSE|Re-scoring existing articles ({done}/{total}) — "
-                    f"checking “{snippet}”..."
-                ))
+                per_rev = (time.time() - t_rev) / max(done, 1)
+                eta_rev = per_rev * (total - done)
+                # Walk the bar through its reserved final 5% (95% -> 100%) and show
+                # a live time-left for this, the last, step of the job.
+                upd(
+                    processed_articles=int(0.95 * n + 0.05 * n * done / max(total, 1)),
+                    message=(
+                        f"STAGE:REVERSE|Re-scoring existing articles ({done}/{total}, "
+                        f"ETA {_fmt_eta(eta_rev)}) — checking “{snippet}”..."
+                    ),
+                )
 
             refreshed_infos = _reverse_push_for_old(
                 db, target_positions, candidate_map, full_records, full_emb, bm25,

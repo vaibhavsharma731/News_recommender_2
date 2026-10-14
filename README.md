@@ -117,12 +117,16 @@ affected article titles. The per-job count is stored in `ingestion_jobs.refreshe
 (auto-migrated with `ALTER TABLE ingestion_jobs ADD COLUMN IF NOT EXISTS refreshed_articles
 INTEGER DEFAULT 0`).
 
+Both the rerank and reverse-update steps show a **time-left that covers the whole job**: the
+rerank ETA adds an estimate of the upcoming reverse pass (`ETA … (incl. ~… reverse)`), and the
+reverse step itself streams a live ETA while it walks the progress bar's final 5% (95% → 100%).
+
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET`  | `/api/status` | Engine health-check + metadata |
-| `GET`  | `/api/articles` | Paginated article list (query: page, per_page, section, sort) |
+| `GET`  | `/api/articles` | Paginated article list (query: page, per_page, section, sort=`date`&#124;`confidence`) |
 | `GET`  | `/api/articles/trending` | Top N most recent articles |
 | `GET`  | `/api/articles/{id}` | Single article by ID |
 | `POST` | `/api/recommend` | Unified recommendation (query, article_id, or user_history) |

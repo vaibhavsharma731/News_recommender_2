@@ -359,10 +359,19 @@ class Recommender:
     def _to_dict(self, pos) -> dict:
         row = self.articles.iloc[pos]
         snippet = row["description"] or row["body"][:200]
+        created = ""
+        if "created_at" in row:
+            val = row["created_at"]
+            try:
+                if pd.notna(val):
+                    created = val.isoformat() if hasattr(val, "isoformat") else str(val)
+            except Exception:
+                created = ""
         return {
             "id": row["id"], "title": row["title"], "snippet": snippet,
             "section": row["section"], "subsection": row["subsection"],
             "date": row["date"].strftime("%d %b %Y") if pd.notna(row["date"]) else "",
             "url": row["url"], "image": row["image"], "is_live": bool(row["is_live"]),
+            "created_at": created,
         }
 

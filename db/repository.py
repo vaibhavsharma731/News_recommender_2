@@ -52,6 +52,38 @@ class ArticleRepository:
         return query.order_by(desc(Article.date).nulls_last()).offset(offset).limit(limit).all()
 
     @staticmethod
+    def list_articles_ranked_by_confidence(
+        db: Session,
+        limit: int = 50,
+        offset: int = 0,
+        section: Optional[str] = None,
+    ) -> List[Article]:
+        """
+        List articles ordered by how CONFIDENT their precomputed recommendations are.
+
+        Confidence = the average ``score`` of the article's stored top-10
+        recommendations (the same 0.0-1.0 blend the reader sees as a percentage).
+        Highest first, so stories whose recommendations are strong (70%, 80% …)
+        surface ahead of weak ones (10%, 20% …). Articles with no recommendations
+        sort last; ties fall back to newest-first.
+        """
+        confidence = func.coalesce(func.avg(ArticleRecommendation.score), 0.0).label("confidence")
+        rec_count = func.count(ArticleRecommendation.id).label("rec_count")
+
+        query = db.query(Article).outerjoin(
+            ArticleRecommendation, ArticleRecommendation.article_id == Article.id
+        )
+        if section:
+            query = query.filter(Article.section.ilike(f"%{section}%"))
+        return (
+            query.group_by(Article.id)
+            .order_by(desc(confidence), desc(rec_count), desc(Article.date).nulls_last(), Article.id)
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+
+    @staticmethod
     def get_sections(db: Session) -> List[str]:
         results = db.query(Article.section).distinct().filter(Article.section.isnot(None)).all()
         return sorted([r[0] for r in results if r[0]])

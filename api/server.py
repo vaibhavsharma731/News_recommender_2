@@ -113,6 +113,8 @@ def reload_engine_from_postgres():
                         "pageViews": int(a.page_views or 0),
                         "uniqueUsers": int(a.unique_users or 0),
                         "linked_ids": linked,
+                        # Ingest time, surfaced on reader recommendation tiles.
+                        "created_at": a.created_at.isoformat() if a.created_at else "",
                         # Reuse the exact text representations saved by ingestion.
                         "text_embed": a.text_embed or f"{title}. {desc}",
                         "text_bm25": a.text_bm25 or f"{title}. {title}. {title}. {desc}. {body}",
@@ -174,6 +176,9 @@ def _article_dict(a: dict) -> dict:
         "url":        _clean_str(a.get("url")),
         "image":      _clean_str(a.get("image")),
         "is_live":    bool(a.get("is_live", False)),
+        # When the article was ingested (its "upload" time), so the reader feed
+        # can show how fresh each recommendation is.
+        "created_at": _clean_str(a.get("created_at")),
     }
 
 
@@ -254,7 +259,12 @@ def get_articles(
     section: str = Query(""),
     sort: str = Query("date"),
 ):
-    """Return a paginated list of articles from PostgreSQL."""
+    """Return a paginated list of articles from PostgreSQL.
+
+    ``sort`` may be ``"date"`` (default) or ``"confidence"`` — the latter ranks
+    articles by the average score of their precomputed recommendations so the
+    strongest-recommendation stories come first.
+    """
     try:
         with SessionLocal() as db:
             total = ArticleRepository.count_articles(db)
@@ -267,9 +277,14 @@ def get_articles(
                     "database_empty": True
                 }
             start = (page - 1) * per_page
-            arts = ArticleRepository.list_articles(
-                db, limit=per_page, offset=start, section=section or None
-            )
+            if sort == "confidence":
+                arts = ArticleRepository.list_articles_ranked_by_confidence(
+                    db, limit=per_page, offset=start, section=section or None
+                )
+            else:
+                arts = ArticleRepository.list_articles(
+                    db, limit=per_page, offset=start, section=section or None
+                )
             return {
                 "total": total,
                 "page": page,

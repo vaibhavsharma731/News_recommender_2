@@ -23,7 +23,7 @@ const Tabs = (() => {
 
   const FEED_CHUNK = 15;     // widgets appended per batch as you scroll
   const FEED_PAGE  = 100;    // API page size when pulling the full article list
-  const SLOT_ORDER = ['top', 'bottom', 'left', 'right'];  // round-robin placement
+  const SLOT_ORDER = ['top', 'bottom', 'left', 'right'];  // assignment order
 
   // ─── TAB NAVIGATION ─────────────────────────────────────────────────────────
   function switchTab(tabName) {
@@ -66,6 +66,10 @@ const Tabs = (() => {
    * Pull EVERY article, not just the first page. The feed is unlimited, so we
    * page through the API (100 at a time) until the whole table is loaded, then
    * render it progressively as the reader scrolls.
+   *
+   * sort='confidence' ranks stories by the average score of their precomputed
+   * recommendations, so widgets whose recommendations are the strongest
+   * (70%, 80% …) appear before weak ones (10%, 20% …).
    */
   async function loadAllArticles(force = false) {
     if (allArticlesCache.length && !force) return allArticlesCache;
@@ -74,7 +78,7 @@ const Tabs = (() => {
     let page = 1;
     let total = Infinity;
     while (acc.length < total && page <= 500) {
-      const data = await Api.articles({ page, perPage: FEED_PAGE, sort: 'date' });
+      const data = await Api.articles({ page, perPage: FEED_PAGE, sort: 'confidence' });
       total = data.total || 0;
       const arts = data.articles || [];
       if (!arts.length) break;
@@ -87,6 +91,16 @@ const Tabs = (() => {
   }
 
   const skelTile = () => '<div class="skeleton orbit-tile orbit-tile-skel"></div>';
+
+  /** Format an article's upload (ingest) time, e.g. "14 Oct, 13:04". */
+  function uploadStamp(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleString(undefined, {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    });
+  }
 
   /** Build a halo widget: centre story + 4 empty recommendation slots. */
   function buildFeedWidget(article) {
@@ -107,23 +121,29 @@ const Tabs = (() => {
     widget.innerHTML = `
       <div class="feed-widget-head">
         <span class="feed-recs-title">✦ Around this story</span>
-        <span class="feed-source-slot" data-slot="source"></span>
+        <span class="feed-head-right">
+          <span class="feed-conf-slot" data-slot="conf"></span>
+          <span class="feed-source-slot" data-slot="source"></span>
+        </span>
       </div>
       <div class="orbit-stage">
         <div class="orbit-slot orbit-slot-top" data-slot="top">${skelTile()}</div>
-        <div class="orbit-slot orbit-slot-left" data-slot="left">${skelTile()}</div>
-        <div class="orbit-main">
-          <div class="orbit-main-thumb">${thumb}</div>
-          <div class="orbit-main-body">
-            <div class="orbit-main-section" style="color:${color}">${(article.section || 'General').toUpperCase()} ${liveBadge}</div>
-            <h3 class="orbit-main-title">${article.title}</h3>
-            <div class="orbit-main-meta">
-              <span>📅 ${article.date || 'Recent'}</span>
-              ${readLink}
+        <div class="orbit-mid">
+          <div class="orbit-slot orbit-slot-left" data-slot="left">${skelTile()}</div>
+          <div class="orbit-main">
+            <div class="orbit-main-thumb">${thumb}</div>
+            <div class="orbit-main-body">
+              <div class="orbit-main-section" style="color:${color}">${(article.section || 'General').toUpperCase()} ${liveBadge}</div>
+              <h3 class="orbit-main-title">${article.title}</h3>
+              <div class="orbit-main-meta">
+                <span>📅 ${article.date || 'Recent'}</span>
+                ${article.created_at ? `<span class="feed-upload" title="Uploaded to the system ${uploadStamp(article.created_at)}">🕘 ${uploadStamp(article.created_at)}</span>` : ''}
+                ${readLink}
+              </div>
             </div>
           </div>
+          <div class="orbit-slot orbit-slot-right" data-slot="right">${skelTile()}</div>
         </div>
-        <div class="orbit-slot orbit-slot-right" data-slot="right">${skelTile()}</div>
         <div class="orbit-slot orbit-slot-bottom" data-slot="bottom">${skelTile()}</div>
       </div>`;
 
@@ -147,6 +167,7 @@ const Tabs = (() => {
       <div class="orbit-tile-body">
         <div class="orbit-tile-section">${(art.section || 'General')}</div>
         <div class="orbit-tile-title">${art.title}</div>
+        ${art.created_at ? `<div class="orbit-tile-meta" title="Uploaded to the system ${uploadStamp(art.created_at)}">🕘 ${uploadStamp(art.created_at)}</div>` : ''}
       </div>`;
 
     if (art.url) {
@@ -157,10 +178,45 @@ const Tabs = (() => {
     return tile;
   }
 
-  /** Distribute the returned recommendations around the centre, round-robin. */
+  /**
+   * Decide how many recommendation tiles go on each side of the centre story.
+   *
+   * Few tiles  -> all on top/bottom rows (a tidy 2-row cluster, avoiding the
+   *               half-empty side columns that used to leave big blank gaps).
+   * Many tiles -> left/right get balanced PAIRS (always equal, so the halo stays
+   *               symmetric) and the remainder fills the top/bottom rows.
+   */
+  function planHaloSlots(n) {
+    if (n <= 0) return { top: 0, bottom: 0, left: 0, right: 0 };
+    if (n <= 6) {
+      const top = Math.ceil(n / 2);
+      return { top, bottom: n - top, left: 0, right: 0 };
+    }
+    const side = n >= 9 ? 2 : 1;
+    const rest = n - 2 * side;
+    const top = Math.ceil(rest / 2);
+    return { top, bottom: rest - top, left: side, right: side };
+  }
+
+  /** Distribute the returned recommendations around the centre. */
   function renderWidgetRecs(widget, data) {
     const chipSlot = widget.querySelector('[data-slot="source"]');
     if (chipSlot) chipSlot.innerHTML = sourceChip(data.source);
+
+    // Average confidence across this story's recommendations — the value the feed
+    // is ordered by, shown so readers can see why a widget ranks where it does.
+    const confSlot = widget.querySelector('[data-slot="conf"]');
+    if (confSlot) {
+      const scores = (data.recommendations || [])
+        .map(r => r.score)
+        .filter(s => typeof s === 'number' && !Number.isNaN(s));
+      if (scores.length) {
+        const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+        confSlot.innerHTML = `<span class="feed-conf-chip" title="Average confidence across this story's recommendations">${Math.round(avg * 100)}% avg</span>`;
+      } else {
+        confSlot.innerHTML = '';
+      }
+    }
 
     const slots = {
       top:    widget.querySelector('[data-slot="top"]'),
@@ -180,9 +236,15 @@ const Tabs = (() => {
       return;
     }
 
-    recs.forEach((rec, i) => {
-      const slot = slots[SLOT_ORDER[i % SLOT_ORDER.length]];
-      if (slot) slot.appendChild(buildOrbitTile(rec));
+    // Spread the recommendations around the centre using the plan above.
+    const plan = planHaloSlots(recs.length);
+    let assign = 0;
+    SLOT_ORDER.forEach(name => {
+      const slot = slots[name];
+      if (!slot) return;
+      for (let k = 0; k < plan[name] && assign < recs.length; k++) {
+        slot.appendChild(buildOrbitTile(recs[assign++]));
+      }
     });
   }
 

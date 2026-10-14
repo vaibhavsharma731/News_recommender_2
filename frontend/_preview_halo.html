@@ -1,96 +1,70 @@
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Halo Widget Preview — throwaway</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="css/variables.css" />
   <link rel="stylesheet" href="css/base.css" />
-  <link rel="stylesheet" href="css/layout.css" />
-  <link rel="stylesheet" href="css/cards.css" />
   <link rel="stylesheet" href="css/tabs.css" />
   <style>
-    body { background: var(--bg-base); padding: 28px; }
-    .preview-wrap { max-width: 1000px; margin: 0 auto; }
-    .preview-note { font-size: .8rem; color: var(--text-muted); margin-bottom: 18px; }
+    body { padding: 24px; background: var(--bg-base); }
+    .preview-label { font: 700 13px system-ui; color: #a855f7; margin: 22px 0 8px; }
   </style>
 </head>
 <body>
-  <div class="preview-wrap">
-    <div class="preview-note">
-      Static design preview (mock data, no backend). Delete this file anytime.
-    </div>
-    <div class="feed-explainer">
-      <span class="feed-explainer-item"><span class="source-chip source-chip-pre">⚡ Precomputed</span> hybrid + rerank</span>
-      <span class="feed-explainer-item"><span class="source-chip source-chip-live">🛰️ Live</span> other modes</span>
-    </div>
-    <div id="article-feed" class="article-feed"></div>
-  </div>
-
-<script>
-  const SECTIONS = ['Politics','Sports','Technology','Business','World','Health'];
-  const EMOJI = { Politics:'🗳️', Sports:'🏅', Technology:'💻', Business:'💼', World:'🌍', Health:'🩺' };
-  const TITLES = [
-    'Supreme Court orders review of electoral bond disclosures',
-    'India clinches series with a last-over thriller in Mumbai',
-    'New AI rules spark debate among Indian startups',
-    'Rupee steadies as markets await budget signals',
-    'Monsoon forecast lifts hopes for kharif sowing season',
-    'Health ministry rolls out expanded vaccination drive',
-    'Parliament panel seeks data on rural jobs scheme',
-    'Olympic hopefuls begin camp ahead of qualifiers',
-    'Chipmaker announces $2bn plant in southern India',
-    'Centre reviews inflation as food prices cool off',
-    'Border talks resume after a month-long pause',
-    'Cities pilot electric bus fleets to cut emissions'
-  ];
-
-  function tile(i, score) {
-    const sec = SECTIONS[i % SECTIONS.length];
-    return `<div class="orbit-tile clickable">
-      <div class="orbit-tile-thumb"><div class="orbit-tile-fallback">${EMOJI[sec]}</div>
-        <span class="orbit-score">${score}%</span></div>
-      <div class="orbit-tile-body">
-        <div class="orbit-tile-section">${sec}</div>
-        <div class="orbit-tile-title">${TITLES[i % TITLES.length]}</div>
-      </div>
-    </div>`;
-  }
-
-  function widget(mainIndex, recCount, chip) {
-    const sec = SECTIONS[mainIndex % SECTIONS.length];
-    const order = ['top','bottom','left','right'];
-    const buckets = { top:'', bottom:'', left:'', right:'' };
-    for (let i = 0; i < recCount; i++) {
-      buckets[order[i % 4]] += tile(mainIndex + i + 1, 96 - i * 4);
+  <div id="feed" class="article-feed"></div>
+  <script>
+    // Mirror of planHaloSlots() in frontend/js/tabs.js
+    const SLOT_ORDER = ['top', 'bottom', 'left', 'right'];
+    function planHaloSlots(n) {
+      if (n <= 0) return { top: 0, bottom: 0, left: 0, right: 0 };
+      if (n <= 6) { const top = Math.ceil(n / 2); return { top, bottom: n - top, left: 0, right: 0 }; }
+      const side = n >= 9 ? 2 : 1;
+      const rest = n - 2 * side;
+      const top = Math.ceil(rest / 2);
+      return { top, bottom: rest - top, left: side, right: side };
     }
-    return `
-      <article class="feed-widget">
+    function tile(i) {
+      return `<div class="orbit-tile"><div class="orbit-tile-thumb"><div class="orbit-tile-fallback">📰</div>` +
+        `<span class="orbit-score">${60 + ((i * 7) % 35)}%</span></div>` +
+        `<div class="orbit-tile-body"><div class="orbit-tile-section">India</div>` +
+        `<div class="orbit-tile-title">Sample recommended story ${i + 1} with a headline that wraps onto two lines</div>` +
+        `<div class="orbit-tile-meta" title="Uploaded to the system">🕘 14 Oct, 13:0${i % 10}</div></div></div>`;
+    }
+    function widget(n) {
+      const plan = planHaloSlots(n);
+      const b = { top: '', bottom: '', left: '', right: '' };
+      let idx = 0;
+      SLOT_ORDER.forEach(name => { for (let k = 0; k < plan[name] && idx < n; k++) b[name] += tile(idx++); });
+      return `<article class="feed-widget">
         <div class="feed-widget-head">
           <span class="feed-recs-title">✦ Around this story</span>
-          <span>${chip}</span>
+          <span class="feed-head-right">
+            <span class="feed-conf-chip">62% avg</span>
+            <span class="source-chip source-chip-pre">⚡ Precomputed</span>
+          </span>
         </div>
         <div class="orbit-stage">
-          <div class="orbit-slot orbit-slot-top">${buckets.top}</div>
-          <div class="orbit-slot orbit-slot-left">${buckets.left}</div>
-          <div class="orbit-main">
-            <div class="orbit-main-thumb"><div class="orbit-main-fallback">${EMOJI[sec]}</div></div>
-            <div class="orbit-main-body">
-              <div class="orbit-main-section" style="color:var(--brand-primary)">${sec.toUpperCase()}</div>
-              <h3 class="orbit-main-title">${TITLES[mainIndex % TITLES.length]}</h3>
-              <div class="orbit-main-meta"><span>📅 12 Oct 2026</span><a class="feed-read-link" href="#">📖 Read story</a></div>
+          <div class="orbit-slot orbit-slot-top">${b.top}</div>
+          <div class="orbit-mid">
+            <div class="orbit-slot orbit-slot-left">${b.left}</div>
+            <div class="orbit-main">
+              <div class="orbit-main-thumb"><div class="orbit-main-fallback">🗳️</div></div>
+              <div class="orbit-main-body">
+                <div class="orbit-main-section">INDIA</div>
+                <h3 class="orbit-main-title">This is the centre story headline that its recommendations are arranged around</h3>
+                <div class="orbit-main-meta"><span>📅 14 Oct 2026</span><span class="feed-upload" title="Uploaded to the system">🕘 14 Oct, 13:04</span><a class="feed-read-link">📖 Read story</a></div>
+              </div>
             </div>
+            <div class="orbit-slot orbit-slot-right">${b.right}</div>
           </div>
-          <div class="orbit-slot orbit-slot-right">${buckets.right}</div>
-          <div class="orbit-slot orbit-slot-bottom">${buckets.bottom}</div>
+          <div class="orbit-slot orbit-slot-bottom">${b.bottom}</div>
         </div>
       </article>`;
-  }
-
-  document.getElementById('article-feed').innerHTML =
-    widget(0, 10, '<span class="source-chip source-chip-pre">⚡ Precomputed</span>') +
-    widget(3, 6,  '<span class="source-chip source-chip-pre">⚡ Precomputed</span>') +
-    widget(6, 4,  '<span class="source-chip source-chip-live">🛰️ Live</span>');
-</script>
+    }
+    document.getElementById('feed').innerHTML = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+      .map(n => `<div style="width:100%"><div class="preview-label">Recommendations count = ${n}</div>${widget(n)}</div>`)
+      .join('');
+  </script>
 </body>
 </html>
